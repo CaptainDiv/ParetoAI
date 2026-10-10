@@ -14,6 +14,7 @@
   - Model in use: `openai/gpt-oss-20b` (chosen after `llama-3.3-70b-versatile` returned 404 — not available on this key; verified available models via `client.models.list()`)
 - **Tracing:** neatlogs SDK (`neatlogs[anthropic]` extra installed, though provider is now Groq/OpenAI-compatible), project `209f4402-89cd-450c-9b1d-267a406e4ff6`, workflow name `pareto-ai` (renamed from `pareto-ai-demo` once the Groq+Neatlogs client was centralized in `pareto_ai/llm.py` for every agent to share — one workflow for the whole pipeline, not one per script)
 - **GitHub API:** via the authenticated `gh` CLI (`gh api graphql`), used by the Proof-of-Skill sourcing to find merged PRs with formally linked closing issues. Target repo: `OpenZeppelin/openzeppelin-contracts` (MIT, Hardhat suite, squash-merge-only — see the #4 build log entry for why each matters)
+- **Embeddings (RAG):** `sentence-transformers` running `all-MiniLM-L6-v2` locally on CPU, over Module content — a Student Agent's retrieval costs no API call and leaves no machine. Install note: `pip install sentence-transformers` on Windows pulls the CUDA build of torch, so install `torch` first from the CPU index (`pip install torch --index-url https://download.pytorch.org/whl/cpu`); the download is slow enough to need `--timeout 120 --retries 10`.
 - **Entire:** not yet integrated — required by hackathon rules, pending (tracked as ticket #6)
 - **cfo.ai:** not yet integrated — required by hackathon rules, pending (tracked as ticket #9); an untracked `docs/business-plan.md` exists but has not been confirmed as cfo.ai output
 - **Decision records:** `docs/adr/0001` (Gemini CLI for Student Agents), `0002` (refuse LLM degradation that would be invisible), `0003` (a Source is a demand measure, not documentation)
@@ -66,6 +67,17 @@
 - `/code-review` found a hard ADR-0002 breach of our own rule: a failed pairing fell back to search order and printed *identically* to a good one. Now every fallback is named in `unpaired_topics` and printed as `NOT MATCHED`, which is what made the 1-of-10 case above visible instead of silent.
 - **Infrastructure note:** a transient DNS outage (`getaddrinfo failed` for both Groq and neatlogs) killed one verification run mid-way. Not a code fault; re-ran clean.
 
+### 2026-10-10 — RAG retriever (ticket #5)
+- Built `pareto_ai/retrieval.py` (16 new tests, 99 passing). Seam 2, `retrieve(curriculum, query, k)`, over local `all-MiniLM-L6-v2` embeddings — no API call, nothing leaves the machine. The embedder is injected, so the bounding rules are TDD'd pure against fixture Curricula while the real model is exercised separately.
+- **The bound, measured live:** a 10-Module Curriculum gave **10 retrievable chunks**, with **34 Deferred Resources linked from those Modules and unreachable** — 10 of 44 Pareto Table entries in reach, which is what makes "bounded to what the Curriculum teaches" a number rather than a claim.
+- **Retrieval is semantic, not lexical, and that is tested rather than asserted.** Live, _"a contract keeps calling back into itself before my first call has finished"_ returned **Checks-Effects-Interactions pattern** and **Reentrancy protection** while sharing not one word with either. Three unit tests pin the same property on a fixture and check their own premise: the chunk found has none of the query's words, and the lexical stand-in embedder cannot represent the question at all.
+- **What a Chunk may contain was the whole design.** One Chunk per Module — a Module already *is* chunk-sized — carrying its topic, what it assumes, and its Resources. Deferred Resources are excluded because they are exactly the 80% the cut set aside, and retrieving them would bound a Student Agent to the whole Pareto Table again. `CONTEXT.md` gained **Chunk** and the rule that retrieval reaches only what a Module teaches.
+- **Failure → fix, caught by `/code-review`'s Spec axis measuring a claim I had only asserted.** `retrieve` dropped chunks scoring `<= 0`, commented as a floor that "almost never fires". The review probed the real embedder: an off-topic question scored a fixture's three chunks at **-0.008, -0.014 and +0.040**, so the sign was noise, the floor was a coin toss, and it admitted +0.040 as relevant regardless. Removed — `k` is the bound the spec names — and recorded as a limitation instead of a threshold invented without calibration data.
+- **Failure → fix, ADR-0002 again, from the Standards axis.** A zero vector scores 0 against everything, so an embedder that half-failed would have returned an empty answer that reads exactly like "nothing in this Curriculum covers that" — a claim about the Curriculum, not the embedder, and one that ends up in a pass rate. Now refused loudly as `RetrievalError`.
+- **An honest miss in the same live run:** _"my transaction runs out of gas inside a loop"_ returned multi-sig and reentrancy Modules, because this Curriculum has no gas Module at all — the placeholder sources never produced one. Retrieval returns its k nearest chunks and cannot say "nothing here covers that", which is the limitation above, visible in the demo rather than hidden by it.
+- **Install friction worth knowing before a demo:** on Windows `pip install sentence-transformers` pulls the CUDA build of torch, so torch comes first from the CPU index; the download then needed `--timeout 120 --retries 10` after a `ReadTimeoutError` killed one attempt mid-way.
+- Retrieval is a step inside an Attempt rather than a workflow of its own, so `retrieve` carries a `RETRIEVER` span and the embedder an `EMBEDDING` span (both OpenInference kinds the neatlogs SDK documents), with a `WORKFLOW` root added for standalone runs so the spans are not orphaned.
+
 ## Demo
 - URL: not yet available
 - Instructions: not yet available
@@ -73,13 +85,14 @@
   - `python -m pareto_ai.analyst` — live Pareto Table, with per-source contribution and spread reported
   - `python -m pareto_ai.curriculum` — Analyst → ordered Curriculum of Modules
   - `python -m pareto_ai.proof_of_skill` — the above, plus a real closed GitHub issue per Module and its Ground Truth printed separately
-  - `python -m pytest` — 83 tests
+  - `python -m pareto_ai.retrieval` — Analyst → Curriculum, then that Curriculum queried the way a Student Agent would, printing what each query retrieves and how much stayed out of reach
+  - `python -m pytest` — 99 tests (3 of them need `sentence-transformers`; see the limitation below)
   - Note: a full run makes ~11 Groq calls and will pause on free-tier rate limits.
 
 ## Known limitations and next steps
 
-**Built and closed:** Analyst (#2), Curriculum (#3), Proof-of-Skill Task sourcing (#4). 83 tests passing.
-**Not started:** RAG retriever (#5, unblocked and next), Student Agent (#6), Judge (#7), Round orchestrator (#8), rendering (#10).
+**Built and closed:** Analyst (#2), Curriculum (#3), Proof-of-Skill Task sourcing (#4), RAG retriever (#5). 99 tests passing.
+**Not started:** Student Agent (#6, unblocked and next), Judge (#7), Round orchestrator (#8), rendering (#10).
 
 - **The Pareto Table's ranking is not yet trustworthy — the biggest open gap.** Per ADR-0003 a Source must be a measure of market demand, and the Analyst's configured sources are documentation, so they are *not* Sources under our own definition. They are kept, explicitly relabelled as placeholders, only so the pipeline runs end to end; every Demand Weight computed from them is meaningless and should not be demoed as a ranking. Ticket **#11** holds the replacement, and `docs/research/` now has a fetch-verified source list to build it from.
 - `ParetoEntry.frequency` still computes a count of citing sources, so it is misnamed under ADR-0003. Renaming it is part of #11, along with the change that makes the name true.
@@ -87,6 +100,9 @@
 - **Proof-of-Skill Task quality:** the candidate pool includes issues whose fix is not code (one run drew *"Release `v5.5.0` has wrong `dev` tag on `npm`"*). A Student Agent cannot meaningfully attempt that and the Judge cannot grade it by running the test suite. The fix is one extra GraphQL field — filter to PRs touching contract or test files — and it matters before #6.
 - **O*NET's weights are coarse where the Curriculum needs them fine:** its tasks are occupation-level ("Test the security and performance of blockchain infrastructures"), not Solidity-level. The only real numeric demand signal does not decompose to Module granularity.
 - `PAGE_TEXT_CHARS = 5000` is now a *content* decision rather than a token budget: it is the sole reason the EEA EthTrust checklist is unusable (its first requirement sits at offset ~5,868). Per-Source caps would serve better.
+- **A Curriculum holds pointers, not prose.** A Module is a topic, what it assumes, and 1-2 links, so what retrieval hands a Student Agent is "this topic, and here is what to read" — not teaching material to learn from. Whether that is enough for an Attempt to succeed is exactly what #6 and #7 will measure, and it is the honest reading of "bounded to the Curriculum" in the meantime.
+- **The three local-embedding tests skip rather than fail** where `sentence-transformers` is not installed, since the pure bounding rules are the part that must never go untested and they need no model. A skip is visible in pytest's output, but a run reporting `96 passed, 3 skipped` has not checked the thing those three exist to check — that retrieval is semantic rather than lexical. First run also downloads the MiniLM weights (~90 MB) from HuggingFace.
+- **Retrieval cannot say "nothing here covers that".** `retrieve` returns the k nearest Chunks and k is the only bound, so an off-topic question still comes back with k Modules. A `<= 0` similarity floor was tried and removed: measured against a fixture, an off-topic question scored three chunks at -0.008, -0.014 and +0.040, so the sign was noise and the floor was a coin toss that admitted +0.040 anyway. A threshold that meant something would need calibration data this project does not have.
 - **No typechecker is configured** in the venv (no mypy/pyright/ruff), so the engineering workflow's typechecking step has nothing to run; compile and import-cycle checks are used instead.
 - Free-tier Groq is **8000 tokens/minute**, which a full pipeline run exceeds. Handled by waiting out 429s, but it makes end-to-end runs slow — worth knowing before recording a demo.
 - **Entire integration not started** (ticket #6) — needed for Checkpoints and the `entire-graph` Repo Map, and it is one of the three mandatory tools.

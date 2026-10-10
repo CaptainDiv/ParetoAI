@@ -40,6 +40,10 @@ _Avoid_: persona, user type
 An agent conditioned on one Learner Profile that attempts a Proof-of-Skill Task as a real coding-agent session (clones the target repo, reads/edits files, runs tests, commits) — not a text-only simulation. Its knowledge of the Target Skill is bounded to what it retrieves from the Curriculum (RAG), not a system-prompt dump of the whole thing. It never sees the Ground Truth.
 _Avoid_: learner (the Student Agent simulates a learner; "learner" alone is ambiguous between the real end user and this simulation)
 
+**Chunk**:
+The unit a Student Agent retrieves the Curriculum in: one Module's teaching content — its topic, what it assumes the learner already knows, and its Resources. Not the Module's Deferred Resources, and not its Proof-of-Skill Task, which a Student Agent is handed as the premise of its Attempt rather than retrieving as something to study.
+_Avoid_: passage, snippet, context (too broad), document
+
 **Attempt**:
 One Student Agent's real coding session against one Module's Proof-of-Skill Task, run in its own isolated clone of the target repo so attempts never interfere with each other.
 _Avoid_: run, try
@@ -81,4 +85,5 @@ _Avoid_: appendix, extra reading
 - **A skill's absence from a Source counts against it only if that Source measures the whole Target Skill.** Documents that divide a subject between them cannot be weighed against each other: a skill missing from one says only that the document was about something else. This is why a Source must be a demand measure, not reference documentation.
 - **Prerequisite-closure is non-negotiable.** If a low-Demand-Weight Pareto Table entry is a hard prerequisite of anything in the Curriculum, the Curriculum agent must include it regardless of its rank. Demand Weight decides emphasis; prerequisites decide inclusion.
 - **Ground Truth is never exposed to a Student Agent**, before or during an Attempt.
+- **Retrieval reaches only what a Module teaches.** A Student Agent's knowledge of the Target Skill is bounded to the Chunks it retrieves, and a Chunk carries a Module's active content alone. Deferred Resources are linked for a learner who wants depth past job-readiness, not material the Curriculum claims to teach: retrieving them would bound a Student Agent to the whole Pareto Table again, leaving nothing to prove about the 20% cut.
 - **Every Attempt runs in its own isolated clone** of the target repo at the commit before the Ground Truth fix, so Attempts never interfere with each other.
