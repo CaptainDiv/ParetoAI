@@ -1,31 +1,16 @@
 """Minimal Anthropic agent demo, instrumented with Neatlogs tracing."""
 
-import os
-
-from dotenv import load_dotenv
-
-load_dotenv()
-
 import neatlogs
-from openai import OpenAI
 
-neatlogs.init(
-    api_key=os.environ["NEATLOGS_API_KEY"],
-    workflow_name="pareto-ai-demo",
-)
+from pareto_ai.llm import MODEL, get_client
 
-client = neatlogs.wrap(
-    OpenAI(
-        api_key=os.environ["GROQ_API_KEY"],
-        base_url="https://api.groq.com/openai/v1",
-    )
-)
+client = get_client()
 
 
 @neatlogs.span(kind="WORKFLOW")
 def answer_question(question: str) -> str:
     response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model=MODEL,
         max_tokens=512,
         messages=[{"role": "user", "content": question}],
     )
