@@ -9,7 +9,7 @@ The professional skill the Curriculum is built for. The system is designed to ge
 _Avoid_: role, track, subject
 
 **Source**:
-A published, live-fetchable measure of market demand for a Target Skill — occupational task data, developer survey results, certification exam objectives. Reference documentation is not a Source: it describes a technology rather than what the job requires.
+A published, live-fetchable measure of market demand for a Target Skill — occupational task data, developer survey results, certification exam objectives, or a prevalence ranking drawn from a practitioner survey. Reference documentation is not a Source: it describes a technology rather than what the job requires.
 _Avoid_: site, page, docs, reference
 
 **Pareto Table**:
