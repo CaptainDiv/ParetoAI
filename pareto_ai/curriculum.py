@@ -27,12 +27,11 @@ from typing import TypeVar
 import neatlogs
 
 from pareto_ai.analyst import ParetoEntry, ParetoTable, run_analyst
-from pareto_ai.llm import MODEL, get_client
+from pareto_ai.llm import complete
 
 MAX_RESOURCES_PER_MODULE = 2
 TOP_FRACTION = 0.2
 PLANNING_MAX_TOKENS = 8192
-PLANNING_REASONING_EFFORT = "low"
 
 PlanT = TypeVar("PlanT", bound=Mapping)
 
@@ -293,17 +292,7 @@ def parse_deferrals(content: str, finish_reason: str | None = None) -> dict[str,
 
 def _ask(prompt: str) -> tuple[str, str | None]:
     """Run one planning call, returning its content and finish reason."""
-    response = get_client().chat.completions.create(
-        model=MODEL,
-        max_tokens=PLANNING_MAX_TOKENS,
-        # MODEL is a reasoning model and charges reasoning tokens against
-        # max_tokens; left on its default it thinks past the budget and returns
-        # an empty string. These are mechanical mapping tasks, not puzzles.
-        reasoning_effort=PLANNING_REASONING_EFFORT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    choice = response.choices[0]
-    return choice.message.content or "", choice.finish_reason
+    return complete(prompt, max_tokens=PLANNING_MAX_TOKENS)
 
 
 def _planned(
