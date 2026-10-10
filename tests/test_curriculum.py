@@ -1,0 +1,345 @@
+import pytest
+
+from pareto_ai.analyst import ParetoEntry, ParetoTable
+from pareto_ai.curriculum import (
+    CurriculumPlanningError,
+    Gap,
+    Resource,
+    _planned,
+    assemble_curriculum,
+    parse_deferrals,
+    parse_prerequisites,
+    parse_resources,
+    select_module_topics,
+)
+
+
+def table(*skills_with_frequency: tuple[str, int], sources: tuple[str, ...] = ("Solidity Docs",)) -> ParetoTable:
+    """A Pareto Table in the ranked order aggregate_pareto_table would produce."""
+    entries = [
+        ParetoEntry(skill=skill, frequency=frequency, sources=sources)
+        for skill, frequency in skills_with_frequency
+    ]
+    entries.sort(key=lambda entry: (-entry.frequency, entry.skill))
+    return ParetoTable(target_skill="smart contract development", entries=tuple(entries))
+
+
+def ten_entry_table() -> ParetoTable:
+    return table(
+        ("solidity syntax", 10),
+        ("gas optimization", 9),
+        ("reentrancy guards", 8),
+        ("ERC-20 standard", 7),
+        ("upgradeable proxies", 6),
+        ("formal verification", 5),
+        ("MEV", 4),
+        ("account abstraction", 3),
+        ("zk circuits", 2),
+        ("EVM bytecode", 1),
+    )
+
+
+# --- select_module_topics: the 20% cut, prerequisite closure, prerequisite order ---
+
+
+def test_selects_the_top_fifth_of_the_table_by_frequency():
+    topics = select_module_topics(ten_entry_table(), prerequisites={})
+
+    assert set(topics) == {"solidity syntax", "gas optimization"}
+
+
+def test_a_tiny_table_still_yields_one_topic():
+    topics = select_module_topics(table(("solidity syntax", 1)), prerequisites={})
+
+    assert topics == ("solidity syntax",)
+
+
+def test_an_empty_table_yields_no_topics():
+    assert select_module_topics(ParetoTable("smart contract development", ()), prerequisites={}) == ()
+
+
+def test_a_low_frequency_hard_prerequisite_is_included_regardless_of_rank():
+    # "EVM bytecode" is dead last by frequency, so the 20% cut drops it — but
+    # gas optimization can't be learned without it.
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={"gas optimization": ("EVM bytecode",)},
+    )
+
+    assert "EVM bytecode" in topics
+
+
+def test_prerequisite_closure_is_transitive():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={"gas optimization": ("EVM bytecode",), "EVM bytecode": ("zk circuits",)},
+    )
+
+    assert {"zk circuits", "EVM bytecode"} <= set(topics)
+
+
+def test_a_prerequisite_comes_before_the_topic_that_needs_it():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={"gas optimization": ("EVM bytecode",), "EVM bytecode": ("zk circuits",)},
+    )
+
+    assert topics.index("zk circuits") < topics.index("EVM bytecode")
+    assert topics.index("EVM bytecode") < topics.index("gas optimization")
+
+
+def test_prerequisites_that_are_not_pareto_table_entries_are_ignored():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={"gas optimization": ("how to use a keyboard",)},
+    )
+
+    assert "how to use a keyboard" not in topics
+
+
+def test_a_prerequisite_cycle_keeps_every_topic_instead_of_hanging():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={"solidity syntax": ("gas optimization",), "gas optimization": ("solidity syntax",)},
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization"}
+
+
+def test_a_topic_listed_as_its_own_prerequisite_is_ignored():
+    topics = select_module_topics(ten_entry_table(), prerequisites={"gas optimization": ("gas optimization",)})
+
+    assert set(topics) == {"solidity syntax", "gas optimization"}
+
+
+def test_a_prior_gap_forces_its_module_topic_back_into_the_curriculum():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        prior_gaps=(Gap(description="no proxy pattern coverage", module_topic="upgradeable proxies"),),
+    )
+
+    assert "upgradeable proxies" in topics
+
+
+def test_a_prior_gap_that_names_no_pareto_table_entry_adds_no_topic():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        prior_gaps=(Gap(description="never heard of it", module_topic="cobol"),),
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization"}
+
+
+# --- assemble_curriculum: Modules, Resources, Deferred Resources ---
+
+PREREQUISITES = {"gas optimization": ("solidity syntax",)}
+TOPICS = ("solidity syntax", "gas optimization")
+RESOURCES = {
+    "solidity syntax": (Resource("Solidity docs: language", "https://docs.soliditylang.org/"),),
+    "gas optimization": (Resource("Gas optimization guide", "https://example.com/gas"),),
+}
+
+
+def test_builds_one_module_per_topic_in_the_order_given():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    assert curriculum.target_skill == "smart contract development"
+    assert [module.topic for module in curriculum.modules] == list(TOPICS)
+
+
+def test_a_module_names_only_earlier_modules_as_prerequisites():
+    # "gas optimization" is ordered first here, so its prerequisite hasn't been
+    # taught yet and must not be claimed as one.
+    curriculum = assemble_curriculum(
+        ten_entry_table(), ("gas optimization", "solidity syntax"), PREREQUISITES, RESOURCES, {}
+    )
+
+    assert curriculum.modules[0].prerequisites == ()
+
+
+def test_a_module_records_prerequisites_it_is_taught_after():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    assert curriculum.modules[1].prerequisites == ("solidity syntax",)
+    assert curriculum.modules[1].unmet_prerequisites == ()
+
+
+def test_a_module_taught_before_its_prerequisite_reports_it_as_unmet():
+    # Only reachable when a prerequisite cycle forced an impossible ordering: the
+    # learner really is missing something here, so it must not read as "no
+    # prerequisites".
+    curriculum = assemble_curriculum(
+        ten_entry_table(), ("gas optimization", "solidity syntax"), PREREQUISITES, RESOURCES, {}
+    )
+
+    assert curriculum.modules[0].unmet_prerequisites == ("solidity syntax",)
+
+
+def test_a_module_carries_at_most_two_resources():
+    resources = {
+        "solidity syntax": (Resource("one"), Resource("two"), Resource("three")),
+        "gas optimization": (Resource("four"),),
+    }
+
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, resources, {})
+
+    assert curriculum.modules[0].resources == (Resource("one"), Resource("two"))
+
+
+def test_a_module_with_no_planned_resources_falls_back_to_its_citing_source():
+    pareto_table = table(("solidity syntax", 1), sources=("Solidity documentation",))
+
+    curriculum = assemble_curriculum(pareto_table, ("solidity syntax",), {}, {}, {})
+
+    assert curriculum.modules[0].resources == (Resource("Solidity documentation"),)
+
+
+def test_every_cut_entry_is_linked_from_exactly_one_module_as_a_deferred_resource():
+    pareto_table = ten_entry_table()
+
+    curriculum = assemble_curriculum(pareto_table, TOPICS, PREREQUISITES, RESOURCES, {})
+
+    deferred = [entry for module in curriculum.modules for entry in module.deferred_resources]
+    assert sorted(entry.skill for entry in deferred) == sorted(
+        entry.skill for entry in pareto_table.entries if entry.skill not in TOPICS
+    )
+
+
+def test_a_cut_entry_is_linked_from_the_module_it_was_assigned_to():
+    curriculum = assemble_curriculum(
+        ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {"MEV": "gas optimization"}
+    )
+
+    gas_module = curriculum.modules[1]
+    assert "MEV" in [entry.skill for entry in gas_module.deferred_resources]
+
+
+def test_an_unassigned_cut_entry_lands_on_the_first_module_rather_than_being_discarded():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    assert "MEV" in [entry.skill for entry in curriculum.modules[0].deferred_resources]
+
+
+def test_a_cut_entry_assigned_to_a_topic_that_is_not_a_module_lands_on_the_first_module():
+    curriculum = assemble_curriculum(
+        ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {"MEV": "formal verification"}
+    )
+
+    assert "MEV" in [entry.skill for entry in curriculum.modules[0].deferred_resources]
+
+
+def test_a_deferred_resource_keeps_its_pareto_table_provenance():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    deferred = {entry.skill: entry for module in curriculum.modules for entry in module.deferred_resources}
+    assert deferred["EVM bytecode"] == ParetoEntry("EVM bytecode", 1, ("Solidity Docs",))
+
+
+def test_gaps_no_module_covers_are_surfaced_rather_than_dropped():
+    gaps = (
+        Gap(description="covered", module_topic="gas optimization"),
+        Gap(description="nothing teaches this", module_topic=None),
+        Gap(description="cut from the curriculum", module_topic="MEV"),
+    )
+
+    curriculum = assemble_curriculum(
+        ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {}, prior_gaps=gaps
+    )
+
+    assert [gap.description for gap in curriculum.uncovered_gaps] == [
+        "nothing teaches this",
+        "cut from the curriculum",
+    ]
+
+
+# --- parsing the model's planning responses --------------------------------
+#
+# The reasoning model will happily spend its whole token budget thinking and
+# return an empty string. Silently reading that as "no prerequisites" disables
+# prerequisite closure invisibly, so every parser refuses a truncated response.
+
+TRUNCATED_PARSERS = (parse_prerequisites, parse_resources, parse_deferrals)
+
+
+@pytest.mark.parametrize("parse", TRUNCATED_PARSERS)
+def test_a_response_truncated_at_the_token_budget_is_refused(parse):
+    with pytest.raises(CurriculumPlanningError, match="budget"):
+        parse("", finish_reason="length")
+
+
+@pytest.mark.parametrize("parse", TRUNCATED_PARSERS)
+def test_a_response_with_no_json_object_is_refused(parse):
+    with pytest.raises(CurriculumPlanningError):
+        parse("Sure! Here are the prerequisites you asked for.")
+
+
+@pytest.mark.parametrize("parse", TRUNCATED_PARSERS)
+def test_an_explicitly_empty_plan_is_accepted(parse):
+    assert parse("{}") == {}
+
+
+def test_parses_prerequisites_surrounded_by_prose():
+    content = 'Here you go:\n{"gas optimization": ["solidity syntax"]}\nHope that helps!'
+
+    assert parse_prerequisites(content) == {"gas optimization": ("solidity syntax",)}
+
+
+def test_reads_a_lone_prerequisite_given_as_a_bare_string():
+    # Dropping it would read downstream as "gas optimization has no prerequisites".
+    content = '{"gas optimization": "solidity syntax", "MEV": ["gas optimization"]}'
+
+    assert parse_prerequisites(content) == {
+        "gas optimization": ("solidity syntax",),
+        "MEV": ("gas optimization",),
+    }
+
+
+def test_refuses_a_prerequisite_entry_that_is_neither_a_list_nor_a_string():
+    with pytest.raises(CurriculumPlanningError, match="gas optimization"):
+        parse_prerequisites('{"gas optimization": {"first": "solidity syntax"}}')
+
+
+def test_parses_resources_with_and_without_urls():
+    content = """{
+      "gas optimization": [
+        {"title": "Gas guide", "url": "https://example.com/gas"},
+        {"title": "No link here"}
+      ]
+    }"""
+
+    assert parse_resources(content) == {
+        "gas optimization": (
+            Resource("Gas guide", "https://example.com/gas"),
+            Resource("No link here", None),
+        )
+    }
+
+
+def test_drops_resources_with_no_title():
+    content = '{"gas optimization": [{"url": "https://example.com"}, {"title": "Gas guide"}]}'
+
+    assert parse_resources(content) == {"gas optimization": (Resource("Gas guide"),)}
+
+
+def test_parses_deferrals_and_drops_non_string_targets():
+    content = '{"MEV": "gas optimization", "zk circuits": ["gas optimization"]}'
+
+    assert parse_deferrals(content) == {"MEV": "gas optimization"}
+
+
+# --- planning calls: one retry, then give up loudly ------------------------
+
+
+def test_a_planning_call_retries_once_when_the_model_answers_unusably():
+    responses = iter([("thinking out loud, no JSON", "stop"), ('{"MEV": "gas optimization"}', "stop")])
+
+    plan = _planned("prompt", parse_deferrals, ask=lambda prompt: next(responses))
+
+    assert plan == {"MEV": "gas optimization"}
+
+
+def test_a_planning_call_that_fails_twice_raises_rather_than_planning_nothing():
+    with pytest.raises(CurriculumPlanningError):
+        _planned("prompt", parse_prerequisites, ask=lambda prompt: ("", "length"))
