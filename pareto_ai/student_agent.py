@@ -188,11 +188,22 @@ def enable_entire(workspace: Path) -> None:
     """Turn on Entire's checkpoint capture for this one clone.
 
     Required before a commit in `workspace` can produce a Checkpoint at all —
-    "enable Entire" is explicit in issue #6's "what to build", distinct from
-    registering the Gemini integration once per machine (`entire agent add
-    gemini`, done ahead of time, not per Attempt).
+    "enable Entire" is explicit in issue #6's "what to build". `--agent gemini`
+    does double duty here, confirmed live: `entire agent add gemini` alone
+    answers "Unknown agent" (external-agent discovery is gated behind an
+    `external_agents` setting nothing sets automatically), but `entire enable
+    --agent gemini` bypasses that gate for this one named, explicit selection
+    and both registers *and* enables the integration in a single call — see
+    ADR-0004. `--checkpoint-backend branch` is explicit because Entire's
+    current default is per-commit git refs, not the `entire/checkpoints/v1`
+    branch CONTEXT.md's Checkpoint entry names.
     """
-    subprocess.run(["entire", "enable", "--agent", "gemini"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["entire", "enable", "--agent", "gemini", "--checkpoint-backend", "branch"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
 
 
 def compute_repo_map(workspace: Path) -> str:
