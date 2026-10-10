@@ -4,6 +4,7 @@ Every agent (Analyst, Curriculum, Judge, ...) calls get_client() to reach the
 same Groq client, wrapped once so traces land in the same Neatlogs workflow.
 """
 
+import json
 import os
 import time
 
@@ -49,6 +50,24 @@ def get_client() -> OpenAI:
             )
         )
     return _client
+
+
+def json_object(content: str) -> dict | None:
+    """The JSON object in a model response, or None if there isn't a usable one.
+
+    Models wrap JSON in prose, so the braces are scanned for rather than the
+    whole string parsed. None means unusable, which is distinct from `{}` — an
+    answer of "nothing" the model actually gave. Callers decide which of those
+    they can live with (see ADR-0002).
+    """
+    start, end = content.find("{"), content.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        parsed = json.loads(content[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _retry_after_seconds(error: RateLimitError, fallback: int) -> float:

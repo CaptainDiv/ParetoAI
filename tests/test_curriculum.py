@@ -11,7 +11,9 @@ from pareto_ai.curriculum import (
     parse_prerequisites,
     parse_resources,
     select_module_topics,
+    with_proof_of_skill_tasks,
 )
+from pareto_ai.proof_of_skill import ProofOfSkillTask
 
 
 def table(*skills_with_frequency: tuple[str, int], sources: tuple[str, ...] = ("Solidity Docs",)) -> ParetoTable:
@@ -343,3 +345,63 @@ def test_a_planning_call_retries_once_when_the_model_answers_unusably():
 def test_a_planning_call_that_fails_twice_raises_rather_than_planning_nothing():
     with pytest.raises(CurriculumPlanningError):
         _planned("prompt", parse_prerequisites, ask=lambda prompt: ("", "length"))
+
+
+# --- attaching Proof-of-Skill Tasks to Modules ---
+
+
+def task(issue_number: int) -> ProofOfSkillTask:
+    return ProofOfSkillTask(
+        repo="OpenZeppelin/openzeppelin-contracts",
+        issue_number=issue_number,
+        title=f"issue {issue_number}",
+        body="body",
+        url=f"https://github.com/OpenZeppelin/openzeppelin-contracts/issues/{issue_number}",
+    )
+
+
+def test_a_module_carries_the_task_assigned_to_its_topic():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    tasked = with_proof_of_skill_tasks(curriculum, {"gas optimization": task(101)})
+
+    assert tasked.modules[1].proof_of_skill_task == task(101)
+
+
+def test_a_module_whose_topic_has_no_task_carries_none():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    tasked = with_proof_of_skill_tasks(curriculum, {"gas optimization": task(101)})
+
+    assert tasked.modules[0].proof_of_skill_task is None
+
+
+def test_attaching_tasks_changes_nothing_else_about_a_module():
+    curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
+
+    tasked = with_proof_of_skill_tasks(curriculum, {"gas optimization": task(101)})
+
+    before, after = curriculum.modules[1], tasked.modules[1]
+    assert (after.topic, after.resources, after.prerequisites, after.deferred_resources) == (
+        before.topic,
+        before.resources,
+        before.prerequisites,
+        before.deferred_resources,
+    )
+
+
+def test_attaching_tasks_preserves_the_curriculum_around_the_modules():
+    curriculum = assemble_curriculum(
+        ten_entry_table(),
+        TOPICS,
+        PREREQUISITES,
+        RESOURCES,
+        {},
+        prior_gaps=(Gap(description="uncovered", module_topic=None),),
+    )
+
+    tasked = with_proof_of_skill_tasks(curriculum, {})
+
+    assert tasked.target_skill == curriculum.target_skill
+    assert tasked.uncovered_gaps == curriculum.uncovered_gaps
+    assert len(tasked.modules) == len(curriculum.modules)

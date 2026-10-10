@@ -16,18 +16,23 @@ decides the final topic set.
 
 from __future__ import annotations
 
-import json
 import math
 import sys
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import TypeVar
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, TypeVar
 
 import neatlogs
 
 from pareto_ai.analyst import ParetoEntry, ParetoTable, run_analyst
-from pareto_ai.llm import complete
+from pareto_ai.llm import complete, json_object
+
+if TYPE_CHECKING:
+    # proof_of_skill imports this module at runtime, so importing it back would
+    # be a cycle. The annotation is all that's needed here, and
+    # `from __future__ import annotations` keeps it from being evaluated.
+    from pareto_ai.proof_of_skill import ProofOfSkillTask
 
 MAX_RESOURCES_PER_MODULE = 2
 TOP_FRACTION = 0.2
@@ -55,11 +60,12 @@ class Gap:
 
 @dataclass(frozen=True)
 class Module:
-    """One unit of the Curriculum.
+    """One unit of the Curriculum: a topic, 1-2 Resources, one Proof-of-Skill Task.
 
-    CONTEXT.md also gives a Module one Proof-of-Skill Task. Sourcing those (a
-    real closed GitHub issue plus its hidden Ground Truth) is its own ticket, so
-    this type is deliberately a Module-minus-its-Task until that lands.
+    A Module is the whole of what a Student Agent is given, so what it can reach
+    is load-bearing: a ProofOfSkillTask is the issue alone, never the merged fix
+    that answers it. Ground Truth lives apart, in the TaskAssignment the
+    Proof-of-Skill sourcing returns, and nothing here can reach it.
     """
 
     topic: str
@@ -71,6 +77,7 @@ class Module:
     # reported rather than hidden, because a learner hitting this Module really is
     # missing something and silence would look like a Module with no prerequisites.
     unmet_prerequisites: tuple[str, ...] = ()
+    proof_of_skill_task: ProofOfSkillTask | None = None  # attached by with_proof_of_skill_tasks
 
 
 @dataclass(frozen=True)
@@ -205,6 +212,23 @@ def assemble_curriculum(
     return Curriculum(target_skill=table.target_skill, modules=tuple(modules), uncovered_gaps=uncovered)
 
 
+def with_proof_of_skill_tasks(
+    curriculum: Curriculum, tasks: Mapping[str, ProofOfSkillTask]
+) -> Curriculum:
+    """A copy of the Curriculum whose Modules carry the tasks assigned to them.
+
+    Takes only the Student-Agent-visible half of a TaskAssignment. The Ground
+    Truth half is deliberately not a parameter here, so a Curriculum cannot be
+    built that carries it.
+    """
+    return replace(
+        curriculum,
+        modules=tuple(
+            replace(module, proof_of_skill_task=tasks.get(module.topic)) for module in curriculum.modules
+        ),
+    )
+
+
 def _module_resources(
     topic: str, resources: Mapping[str, Sequence[Resource]], entry: ParetoEntry | None
 ) -> tuple[Resource, ...]:
@@ -235,14 +259,8 @@ def _plan_object(content: str, finish_reason: str | None) -> dict:
             f"planning response hit the {PLANNING_MAX_TOKENS}-token budget before answering "
             "(the model spends this budget on reasoning too)"
         )
-    start, end = content.find("{"), content.rfind("}")
-    parsed = None
-    if start != -1 and end != -1:
-        try:
-            parsed = json.loads(content[start : end + 1])
-        except json.JSONDecodeError:
-            parsed = None
-    if not isinstance(parsed, dict):
+    parsed = json_object(content)
+    if parsed is None:
         raise CurriculumPlanningError(
             f"planning response was not a JSON object (finish_reason={finish_reason}, "
             f"{len(content)} chars): {content[:300]!r}"
