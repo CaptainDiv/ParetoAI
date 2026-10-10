@@ -8,9 +8,17 @@ A multi-agent system that builds a minimal, high-coverage ("Pareto") learning cu
 The professional skill the Curriculum is built for. The system is designed to generalize to any skill; the MVP targets exactly one — smart contract development (Solidity/EVM) — chosen over the original cybersecurity framing because its proof-of-skill step requires real, gradable GitHub issues with merged fixes, which smart-contract repos have in abundance.
 _Avoid_: role, track, subject
 
+**Source**:
+A published, live-fetchable measure of market demand for a Target Skill — occupational task data, developer survey results, certification exam objectives. Reference documentation is not a Source: it describes a technology rather than what the job requires.
+_Avoid_: site, page, docs, reference
+
 **Pareto Table**:
-The Analyst agent's output: a table of skills for the Target Skill, ranked by how often they appear across public sources (roadmaps, cert objectives, O*NET/BLS data, GitHub signals, Stack Overflow survey data), fetched live rather than scraped from job boards or hand-seeded.
+The Analyst agent's output: a table of skills for the Target Skill, ranked by Demand Weight, fetched live rather than hand-seeded.
 _Avoid_: skill list, rankings
+
+**Demand Weight**:
+How strongly a skill's Sources report the market demanding it — the number a Pareto Table ranks on. Each Source reports demand on its own scale (task-importance ratings, percentage of survey respondents, share of a certification exam), so a Demand Weight combines those rather than counting how many Sources mention the skill.
+_Avoid_: frequency (it reads as a count of mentions, which is what this deliberately is not), score, rank
 
 **Curriculum**:
 The ordered set of Modules the Curriculum agent cuts from the top ~20% of the Pareto Table, in prerequisite order. Produced fresh each Round.
@@ -70,6 +78,7 @@ _Avoid_: appendix, extra reading
 
 ## Rules
 
-- **Prerequisite-closure is non-negotiable.** If a low-frequency Pareto Table entry is a hard prerequisite of anything in the Curriculum, the Curriculum agent must include it regardless of its frequency rank. Frequency decides emphasis; prerequisites decide inclusion.
+- **A skill's absence from a Source counts against it only if that Source measures the whole Target Skill.** Documents that divide a subject between them cannot be weighed against each other: a skill missing from one says only that the document was about something else. This is why a Source must be a demand measure, not reference documentation.
+- **Prerequisite-closure is non-negotiable.** If a low-Demand-Weight Pareto Table entry is a hard prerequisite of anything in the Curriculum, the Curriculum agent must include it regardless of its rank. Demand Weight decides emphasis; prerequisites decide inclusion.
 - **Ground Truth is never exposed to a Student Agent**, before or during an Attempt.
 - **Every Attempt runs in its own isolated clone** of the target repo at the commit before the Ground Truth fix, so Attempts never interfere with each other.

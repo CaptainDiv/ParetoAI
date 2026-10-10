@@ -1,0 +1,14 @@
+# A Source is a measure of market demand, not reference documentation
+
+The Analyst originally ranked skills by how many canonical documentation pages mentioned them (ethereum.org, the Solidity docs, OpenZeppelin Contracts). Run live, that produced a table where **45 of 45 entries tied at frequency 1**, and even after an LLM pass merging differently-worded names only 7 of 40 reached 2 — because reference documentation *partitions* a subject rather than surveying it. `ERC-20 standard` is absent from the Solidity security page not because tokens don't matter but because that page is about something else, so counting its absence as a zero is a category error. Worse, it made the ranking circular: a skill's score was decided by how many of the hand-picked pages happened to cover its sub-area, so including three security-ish Sources made security topics score 2 — the "demand signal" was a readback of the source list a human chose. So **Source** is now defined as a published measure of market demand (occupational task data, developer survey results, certification exam objectives), and the ranked quantity as **Demand Weight** rather than a frequency. That is the measure user story 1 actually asks for — "the ~20% of material that covers most real-world demand" — and the kind of source the original spec listed before the implementation drifted to documentation because documentation was easier to fetch.
+
+## Considered Options
+
+- **Keep documentation Sources, count how many mention each skill** — rejected: demonstrably flat and circular, per above. It is by far the easiest to fetch, which is exactly why the implementation drifted here; the convenience is the trap.
+- **Keep documentation Sources, rank by prominence within the corpus** (headings, sections, depth rather than source count) — rejected: it reads as a demand signal while really measuring how verbose a page is, letting one long reference page outvote a genuinely important topic. It would have required no new sources, which was its only real appeal.
+
+## Consequences
+
+- Reference documentation is **not** a Source, however authoritative. A future reader will reasonably want to add the Solidity docs back — that reintroduces the circularity above. Documentation's proper place is as a Module's Resource, which is where the Curriculum agent already uses it.
+- Demand data for this Target Skill is thin, and this was accepted with that known: O*NET has no smart-contract occupation, and the Stack Overflow survey reports language usage without decomposing into sub-skills. Certification exam objectives are the one demand Source that both decomposes into sub-skills and publishes weightings, so they carry most of the load for the MVP.
+- `ParetoEntry.frequency` is misnamed under this decision and still computes `len(sources)`. The code lags the model until #11 lands.
