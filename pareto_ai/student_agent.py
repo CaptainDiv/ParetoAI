@@ -22,9 +22,11 @@ it is structural rather than a convention to remember:
 
 Checkpoint capture for the Gemini CLI session runs through `entire-agent-gemini`
 (see that module and ADR-0004) — Entire's native Gemini support was retired,
-so this ticket depends on that integration being installed and registered
-(`entire agent add gemini`) and the machine having already run `entire login`,
-neither of which an agent can do on a user's behalf.
+so this ticket depends on that integration being on `$PATH` and the machine
+having already run `entire login`, neither of which an agent can do on a
+user's behalf. `enable_entire` below is what actually registers it
+(`entire enable --agent gemini`, not `entire agent add gemini` — see
+ADR-0004 for why the latter alone doesn't work).
 
 Pure core (prompt assembly, workspace naming) is TDD'd. Everything that shells
 out — git, entire, gemini — is live and smoke-tested via main(), per the
@@ -37,6 +39,7 @@ they can't.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -55,6 +58,17 @@ from pareto_ai.retrieval import Chunk, retrieve
 
 GEMINI_TIMEOUT_SECONDS = 1800
 RETRIEVAL_K = 3
+
+# Gemini CLI's own router picks a flagship model (gemini-3.8-flash at the time
+# of writing) by default, and that model's free-tier quota is 20 requests/day
+# shared across every call this project makes — exhausted mid-development, by
+# hand, well short of a real Attempt's actual tool-call volume. The "-lite"
+# variants are the same model family at 500 requests/day (confirmed live via
+# https://ai.dev/rate-limit on 2026-10-11), so pinning one here is a real fix
+# for running out of quota during a demo or judging, not a downgrade in what's
+# being tested — Entire capture and the integration don't care which Gemini
+# model produced the turn.
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 
 @dataclass(frozen=True)
@@ -224,16 +238,33 @@ def compute_repo_map(workspace: Path) -> str:
 def run_gemini_attempt(workspace: Path, prompt: str) -> int:
     """Run the Attempt as a real, non-interactive Gemini CLI session.
 
-    `--skip-trust` is required for a freshly cloned, never-opened-interactively
-    workspace to run headlessly at all (see ADR-0004's note on Gemini CLI's own
-    trusted-folders gate). Checkpoint capture happens as a side effect of this
-    call, through hooks `entire-agent-gemini` installed — nothing here talks to
-    Entire directly.
+    Two separate gates have to be cleared for a freshly cloned, never-opened-
+    interactively workspace to actually edit files and commit headlessly, not
+    just one — confirmed live, not assumed (see ADR-0004):
+
+    - `--yolo` auto-approves tool calls instead of prompting.
+    - `GEMINI_CLI_TRUST_WORKSPACE=true` is what actually grants the Policy
+      Engine's trust, which gates `run_shell_command` independently of
+      approval mode. `--skip-trust` alone only skips the interactive trust
+      *prompt* — it does not grant this, so `run_shell_command` (needed for
+      every edit-run-commit step of an Attempt) is denied by policy under
+      `--skip-trust --yolo` even though `--yolo` auto-approves everything
+      else.
+
+    `-m GEMINI_MODEL` pins a high-quota model rather than leaving Gemini's own
+    router to pick its flagship model, whose free-tier daily cap (20 requests)
+    this project exhausted by hand well short of a real Attempt's tool-call
+    volume — pinning the same family's "-lite" variant (500/day) is how a demo
+    or judging run avoids hitting that wall.
+
+    Checkpoint capture happens as a side effect of this call, through hooks
+    `entire-agent-gemini` installed — nothing here talks to Entire directly.
     """
     result = subprocess.run(
-        ["gemini", "-p", prompt, "--skip-trust"],
+        ["gemini", "-m", GEMINI_MODEL, "-p", prompt, "--yolo"],
         cwd=workspace,
         timeout=GEMINI_TIMEOUT_SECONDS,
+        env={**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"},
     )
     return result.returncode
 
