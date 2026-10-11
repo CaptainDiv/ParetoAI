@@ -52,9 +52,9 @@ from pareto_ai.retrieval import retrieve
 from pareto_ai.student_agent import AttemptResult, LearnerProfile, TOTAL_BEGINNER, run_attempt
 
 RUBRIC_MAX_TOKENS = 4096
-# Each diff is capped independently: Groq's free tier counts input tokens
-# against the same per-minute budget llm.py already has to wait out, and a
-# real OpenZeppelin fix diff is routinely far larger than either cap alone.
+# Each diff is capped independently: every input token is spent from the
+# gateway's shared budget (llm.py), and a real OpenZeppelin fix diff is
+# routinely far larger than either cap alone.
 DIFF_CHARS = 3000
 RETRIEVAL_K = 3
 TEST_SUITE_TIMEOUT_SECONDS = 900
@@ -120,8 +120,7 @@ def parse_gaps(content: str, finish_reason: str | None, known_topics: Sequence[s
     """
     if finish_reason == "length":
         raise JudgeGradingError(
-            f"rubric response hit the {RUBRIC_MAX_TOKENS}-token budget before answering "
-            "(the model spends this budget on reasoning too)"
+            f"rubric response hit the {RUBRIC_MAX_TOKENS}-token budget before it finished"
         )
     parsed = json_object(content)
     if parsed is None or not isinstance(parsed.get("gaps"), list):

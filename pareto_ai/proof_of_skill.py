@@ -329,9 +329,9 @@ def pair_tasks_to_modules(
 def _pairing_attempt(prompt: str) -> dict[str, str] | None:
     """One pairing call. None means unusable, which is why finish_reason matters.
 
-    A truncated answer is the ADR-0002 failure exactly: MODEL spends the budget
-    reasoning and returns an empty string, which would otherwise read as "no
-    pairings were possible".
+    A truncated answer is the ADR-0002 failure exactly: an answer cut off at the
+    budget is unusable JSON, which would otherwise read as "no pairings were
+    possible".
     """
     content, finish_reason = complete(prompt, max_tokens=PAIRING_MAX_TOKENS)
     if finish_reason == "length":

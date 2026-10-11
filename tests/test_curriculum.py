@@ -260,9 +260,9 @@ def test_gaps_no_module_covers_are_surfaced_rather_than_dropped():
 
 # --- parsing the model's planning responses --------------------------------
 #
-# The reasoning model will happily spend its whole token budget thinking and
-# return an empty string. Silently reading that as "no prerequisites" disables
-# prerequisite closure invisibly, so every parser refuses a truncated response.
+# A response cut off at its token budget can come back empty or half-written.
+# Silently reading that as "no prerequisites" disables prerequisite closure
+# invisibly, so every parser refuses a truncated response.
 
 TRUNCATED_PARSERS = (parse_prerequisites, parse_resources, parse_deferrals)
 

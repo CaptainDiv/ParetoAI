@@ -1,7 +1,10 @@
-"""Shared Groq-backed LLM client, instrumented with Neatlogs tracing.
+"""Shared LLM client for the Analyst, Curriculum and Judge, instrumented with Neatlogs tracing.
 
-Every agent (Analyst, Curriculum, Judge, ...) calls get_client() to reach the
-same Groq client, wrapped once so traces land in the same Neatlogs workflow.
+Every agent calls get_client() to reach the same client, wrapped once so traces
+land in the same Neatlogs workflow. It points at neatHack's own LiteLLM gateway,
+the one the Student Agent already uses through opencode.json (ADR-0005), not
+Groq: Groq's free tier stalled a single Analyst-plus-Curriculum session on
+2026-10-11, sitting in a rate-limit wait for 26 minutes with nothing in flight.
 """
 
 import json
@@ -15,16 +18,16 @@ load_dotenv()
 import neatlogs
 from openai import OpenAI, RateLimitError
 
-MODEL = "openai/gpt-oss-20b"
+GATEWAY_URL = "https://litellm.vision.aivar.app/v1"
+# Structured JSON and judgement (which Occupational Task a skill serves, which
+# Module a Gap belongs to) matter more here than the cheapest tokens, and the
+# gateway's Nova models are the Student Agent's. No reasoning_effort is sent:
+# the gateway rejects it for every model it serves (Claude maps it to a
+# thinking budget that must fit inside max_tokens; Bedrock Nova has no such
+# parameter), verified live 2026-10-11.
+MODEL = "claude-haiku"
 
-# MODEL is a reasoning model and charges reasoning tokens against max_tokens, so
-# a budget sized for the answer alone gets spent thinking and comes back empty.
-# Every agent here does mechanical extraction and mapping, not puzzles.
-REASONING_EFFORT = "low"
-
-# Groq's on-demand tier caps tokens per minute, and one Analyst run over several
-# Sources followed by a Curriculum run exceeds it. The cap is per rolling minute,
-# so waiting clears it.
+# The gateway can still answer 429. Waiting a rolling window out clears it.
 _RATE_LIMIT_WAITS_SECONDS = (5, 15, 30)
 
 _client: OpenAI | None = None
@@ -45,8 +48,8 @@ def get_client() -> OpenAI:
         init_tracing()
         _client = neatlogs.wrap(
             OpenAI(
-                api_key=os.environ["GROQ_API_KEY"],
-                base_url="https://api.groq.com/openai/v1",
+                api_key=os.environ["LITELLM_API_KEY"],
+                base_url=GATEWAY_URL,
             )
         )
     return _client
@@ -78,8 +81,8 @@ def _retry_after_seconds(error: RateLimitError, fallback: int) -> float:
         return fallback
 
 
-def complete(prompt: str, *, max_tokens: int, reasoning_effort: str = REASONING_EFFORT) -> tuple[str, str | None]:
-    """One chat completion, waiting out the tier's per-minute token limit.
+def complete(prompt: str, *, max_tokens: int) -> tuple[str, str | None]:
+    """One chat completion, waiting out the gateway's rate limit.
 
     Returns the content and the finish reason; the caller decides whether an
     empty or truncated answer is tolerable (see ADR-0002).
@@ -89,7 +92,6 @@ def complete(prompt: str, *, max_tokens: int, reasoning_effort: str = REASONING_
             response = get_client().chat.completions.create(
                 model=MODEL,
                 max_tokens=max_tokens,
-                reasoning_effort=reasoning_effort,
                 messages=[{"role": "user", "content": prompt}],
             )
         except RateLimitError as error:

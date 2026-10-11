@@ -26,14 +26,11 @@ from bs4 import BeautifulSoup
 from pareto_ai.llm import complete, json_object
 
 # Sized for every rated item of a weighted Source (O*NET rates 17 Occupational
-# Tasks, quoted whole), plus the reasoning tokens MODEL charges against the
-# same budget.
+# Tasks, quoted whole), with headroom.
 EXTRACTION_MAX_TOKENS = 2048
 ALIAS_MAX_TOKENS = 4096
-# Which Occupational Task a skill serves is a judgement that decides its Demand
-# Weight, not mechanical extraction, so it gets more reasoning and the budget for it.
-CLASSIFICATION_MAX_TOKENS = 8192
-CLASSIFICATION_REASONING_EFFORT = "medium"
+# One answer per skill across the whole Pareto Table, so the largest of the three.
+CLASSIFICATION_MAX_TOKENS = 4096
 # Per-Source prompt budget. Several Sources plus the Curriculum agent share one
 # per-minute token quota, so each page is trimmed rather than sent whole.
 PAGE_TEXT_CHARS = 5000
@@ -516,11 +513,6 @@ def _served_occupational_tasks_prompt(
     )
 
 
-def _classify(prompt: str) -> tuple[str, str | None]:
-    return complete(
-        prompt, max_tokens=CLASSIFICATION_MAX_TOKENS, reasoning_effort=CLASSIFICATION_REASONING_EFFORT
-    )
-
 
 @neatlogs.span(kind="AGENT", role="Analyst")
 def classify_served_occupational_tasks(
@@ -536,12 +528,12 @@ def classify_served_occupational_tasks(
     if not skills or not occupational_tasks:
         return {}
     prompt = _served_occupational_tasks_prompt(target_skill, skills, occupational_tasks)
-    content, finish_reason = _classify(prompt)
+    content, finish_reason = complete(prompt, max_tokens=CLASSIFICATION_MAX_TOKENS)
     served = parse_served_occupational_tasks(content, skills, occupational_tasks)
     missing = [skill for skill in skills if skill not in served]
     if missing:
         prompt = _served_occupational_tasks_prompt(target_skill, missing, occupational_tasks)
-        content, finish_reason = _classify(prompt)
+        content, finish_reason = complete(prompt, max_tokens=CLASSIFICATION_MAX_TOKENS)
         served |= parse_served_occupational_tasks(content, missing, occupational_tasks)
         missing = [skill for skill in skills if skill not in served]
     if missing:

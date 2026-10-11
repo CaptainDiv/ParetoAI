@@ -256,8 +256,7 @@ class CurriculumPlanningError(RuntimeError):
 def _plan_object(content: str, finish_reason: str | None) -> dict:
     if finish_reason == "length":
         raise CurriculumPlanningError(
-            f"planning response hit the {PLANNING_MAX_TOKENS}-token budget before answering "
-            "(the model spends this budget on reasoning too)"
+            f"planning response hit the {PLANNING_MAX_TOKENS}-token budget before it finished"
         )
     parsed = json_object(content)
     if parsed is None:
@@ -322,7 +321,7 @@ def _planned(
 
     MODEL intermittently emits malformed JSON on the larger plans, and a plan is
     cheap to re-ask for. If the second attempt is unusable too, the error stands.
-    `ask` is injected so the retry is testable without reaching Groq.
+    `ask` is injected so the retry is testable without reaching the model.
     """
     try:
         return parse(*ask(prompt))
