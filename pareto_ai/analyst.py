@@ -76,7 +76,7 @@ class Rank:
 class Source:
     name: str
     url: str
-    # How this Source reports demand. None means it only enumerates skills (a
+    # The Source's Demand Scale. None means it only enumerates skills (a
     # certification's objectives list): it can add entries but not weigh them.
     scale: Rating | Rank | None
     measures_whole_target_skill: bool
