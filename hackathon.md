@@ -89,6 +89,15 @@
 - **Honest limitation found in a second verification run, not hidden:** the cheapest gateway model (Nova Lite) occasionally guesses a Unix-style path on Windows that its own `write` and `bash` tools resolve inconsistently, and gives up after retrying. `student_agent.committed_sha` correctly reported `None` rather than a false success — a model-reliability note, not a pipeline defect, and not a reason to hold the ticket open.
 - Closed both #12 and #6. `entire_agent_gemini.py` stays in the repo, unused by the active pipeline but correct and documented — real evidence of a failure recovered from, which this hackathon explicitly asks submissions to show, not something to delete because the plan changed.
 
+### 2026-10-11 — Judge agent (ticket #7)
+- Built `pareto_ai/judge.py` (17 new tests, 165 passing overall). Two independent signals per Attempt, per CONTEXT.md's Judge Agent entry: the target repo's own test suite for an objective pass/fail, and an LLM-rubric comparison of the Attempt's diff against the Ground Truth's diff for qualitative Gaps, each mapped to a Module or flagged (`module_topic=None`) when no Module in the Curriculum covers it.
+- **A real correctness gap caught before it shipped, not left for a demo to surface:** a fix PR adds its regression test in the same commit as the fix, so running the suite against an Attempt that changed nothing at all would still only exercise tests that already existed before the bug was found — a trivial pass. `apply_ground_truth_tests` checks out just the Ground Truth's test files (never its non-test files, which would hand the Attempt the fix itself) onto the Attempt's tree before the suite runs, so "passed" means the Attempt's own code satisfies the real regression test.
+- **No extra GitHub fetch needed for either diff.** An Attempt's commit and a Ground Truth's merge commit both live in the same full clone `student_agent.clone_isolated_workspace` already made, so `git diff` inside that same workspace produces both the Attempt's diff and the Ground Truth's diff directly.
+- **ADR-0002 applied as written, not just cited:** the rubric call is on the refusing side — a truncated or unparseable response raises `JudgeGradingError` (retried once) rather than reading as `()` Gaps, which the ADR calls out by name as the one place this project cannot afford invisible degradation, since the pass rate is its central claim.
+- Ran `/code-review` (Standards + Spec) before committing: Standards found no hard violations; Spec's one actionable finding was that the `AGENT/Judge` neatlogs span sat on the whole per-Attempt orchestrator, which would have made a multi-minute `npm ci`/`npm test` run read as part of an LLM-agent span. Moved the span onto `grade_gaps` alone — the one function that actually calls the LLM — matching `curriculum.py`'s one-span-per-call precedent.
+- Pure core (`is_test_file`, `select_test_files`, `parse_gaps`, `_graded`, `grade_gaps`'s no-diff shortcut) is TDD'd; running the real suite, the real `git diff`s, and the live rubric call are smoke-tested only via `main()`, per the project's established pattern — these need the real repo, git history, and LLM on hand, which unit tests cannot stand in for.
+- Closed #7.
+
 ## Demo
 - URL: not yet available
 - Instructions: not yet available
@@ -103,8 +112,8 @@
 
 ## Known limitations and next steps
 
-**Built and closed:** Analyst (#2), Curriculum (#3), Proof-of-Skill Task sourcing (#4), RAG retriever (#5), Student Agent + Entire integration (#6, #12). 148 tests passing.
-**Not started:** Judge (#7), Round orchestrator (#8), rendering (#10).
+**Built and closed:** Analyst (#2), Curriculum (#3), Proof-of-Skill Task sourcing (#4), RAG retriever (#5), Student Agent + Entire integration (#6, #12), Judge agent (#7). 165 tests passing.
+**Not started:** Round orchestrator (#8), rendering (#10), cfo.ai business plan (#9).
 
 - **The Pareto Table's ranking is not yet trustworthy — the biggest open gap.** Per ADR-0003 a Source must be a measure of market demand, and the Analyst's configured sources are documentation, so they are *not* Sources under our own definition. They are kept, explicitly relabelled as placeholders, only so the pipeline runs end to end; every Demand Weight computed from them is meaningless and should not be demoed as a ranking. Ticket **#11** holds the replacement, and `docs/research/` now has a fetch-verified source list to build it from.
 - `ParetoEntry.frequency` still computes a count of citing sources, so it is misnamed under ADR-0003. Renaming it is part of #11, along with the change that makes the name true.
