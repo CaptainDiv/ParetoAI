@@ -83,6 +83,7 @@ _Avoid_: appendix, extra reading
 ## Rules
 
 - **A skill's absence from a Source counts against it only if that Source measures the whole Target Skill.** Documents that divide a subject between them cannot be weighed against each other: a skill missing from one says only that the document was about something else. This is why a Source must be a demand measure, not reference documentation.
+- **A Source that publishes no scale can add skills to a Pareto Table but cannot weigh them.** An enumeration such as a certification's objectives list says a skill is demanded, not how strongly, so it contributes nothing to any Demand Weight (ADR-0006).
 - **Prerequisite-closure is non-negotiable.** If a low-Demand-Weight Pareto Table entry is a hard prerequisite of anything in the Curriculum, the Curriculum agent must include it regardless of its rank. Demand Weight decides emphasis; prerequisites decide inclusion.
 - **Ground Truth is never exposed to a Student Agent**, before or during an Attempt.
 - **Retrieval reaches only what a Module teaches.** A Student Agent's knowledge of the Target Skill is bounded to the Chunks it retrieves, and a Chunk carries a Module's active content alone. Deferred Resources are linked for a learner who wants depth past job-readiness, not material the Curriculum claims to teach: retrieving them would bound a Student Agent to the whole Pareto Table again, leaving nothing to prove about the 20% cut.

@@ -16,42 +16,44 @@ from pareto_ai.curriculum import (
 from pareto_ai.proof_of_skill import ProofOfSkillTask
 
 
-def table(*skills_with_frequency: tuple[str, int], sources: tuple[str, ...] = ("Solidity Docs",)) -> ParetoTable:
+def table(
+    *skills_with_demand_weight: tuple[str, float], sources: tuple[str, ...] = ("O*NET Blockchain Engineers",)
+) -> ParetoTable:
     """A Pareto Table in the ranked order aggregate_pareto_table would produce."""
     entries = [
-        ParetoEntry(skill=skill, frequency=frequency, sources=sources)
-        for skill, frequency in skills_with_frequency
+        ParetoEntry(skill=skill, demand_weight=demand_weight, sources=sources)
+        for skill, demand_weight in skills_with_demand_weight
     ]
-    entries.sort(key=lambda entry: (-entry.frequency, entry.skill))
+    entries.sort(key=lambda entry: (-entry.demand_weight, entry.skill))
     return ParetoTable(target_skill="smart contract development", entries=tuple(entries))
 
 
 def ten_entry_table() -> ParetoTable:
     return table(
-        ("solidity syntax", 10),
-        ("gas optimization", 9),
-        ("reentrancy guards", 8),
-        ("ERC-20 standard", 7),
-        ("upgradeable proxies", 6),
-        ("formal verification", 5),
-        ("MEV", 4),
-        ("account abstraction", 3),
-        ("zk circuits", 2),
-        ("EVM bytecode", 1),
+        ("solidity syntax", 1.0),
+        ("gas optimization", 0.9),
+        ("reentrancy guards", 0.8),
+        ("ERC-20 standard", 0.7),
+        ("upgradeable proxies", 0.6),
+        ("formal verification", 0.5),
+        ("MEV", 0.4),
+        ("account abstraction", 0.3),
+        ("zk circuits", 0.2),
+        ("EVM bytecode", 0.1),
     )
 
 
 # --- select_module_topics: the 20% cut, prerequisite closure, prerequisite order ---
 
 
-def test_selects_the_top_fifth_of_the_table_by_frequency():
+def test_selects_the_top_fifth_of_the_table_by_demand_weight():
     topics = select_module_topics(ten_entry_table(), prerequisites={})
 
     assert set(topics) == {"solidity syntax", "gas optimization"}
 
 
 def test_a_tiny_table_still_yields_one_topic():
-    topics = select_module_topics(table(("solidity syntax", 1)), prerequisites={})
+    topics = select_module_topics(table(("solidity syntax", 0.5)), prerequisites={})
 
     assert topics == ("solidity syntax",)
 
@@ -60,8 +62,8 @@ def test_an_empty_table_yields_no_topics():
     assert select_module_topics(ParetoTable("smart contract development", ()), prerequisites={}) == ()
 
 
-def test_a_low_frequency_hard_prerequisite_is_included_regardless_of_rank():
-    # "EVM bytecode" is dead last by frequency, so the 20% cut drops it — but
+def test_a_low_demand_weight_hard_prerequisite_is_included_regardless_of_rank():
+    # "EVM bytecode" is dead last by Demand Weight, so the 20% cut drops it — but
     # gas optimization can't be learned without it.
     topics = select_module_topics(
         ten_entry_table(),
@@ -191,11 +193,11 @@ def test_a_module_carries_at_most_two_resources():
 
 
 def test_a_module_with_no_planned_resources_falls_back_to_its_citing_source():
-    pareto_table = table(("solidity syntax", 1), sources=("Solidity documentation",))
+    pareto_table = table(("solidity syntax", 0.5), sources=("Cyfrin exam objectives",))
 
     curriculum = assemble_curriculum(pareto_table, ("solidity syntax",), {}, {}, {})
 
-    assert curriculum.modules[0].resources == (Resource("Solidity documentation"),)
+    assert curriculum.modules[0].resources == (Resource("Cyfrin exam objectives"),)
 
 
 def test_every_cut_entry_is_linked_from_exactly_one_module_as_a_deferred_resource():
@@ -236,7 +238,7 @@ def test_a_deferred_resource_keeps_its_pareto_table_provenance():
     curriculum = assemble_curriculum(ten_entry_table(), TOPICS, PREREQUISITES, RESOURCES, {})
 
     deferred = {entry.skill: entry for module in curriculum.modules for entry in module.deferred_resources}
-    assert deferred["EVM bytecode"] == ParetoEntry("EVM bytecode", 1, ("Solidity Docs",))
+    assert deferred["EVM bytecode"] == ParetoEntry("EVM bytecode", 0.1, ("O*NET Blockchain Engineers",))
 
 
 def test_gaps_no_module_covers_are_surfaced_rather_than_dropped():

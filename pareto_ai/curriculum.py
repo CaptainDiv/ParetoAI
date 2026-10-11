@@ -111,9 +111,9 @@ def select_module_topics(
 ) -> tuple[str, ...]:
     """The topic of each Module the Curriculum will have, in prerequisite order.
 
-    Starts from the top TOP_FRACTION of the (already frequency-ranked) table,
+    Starts from the top TOP_FRACTION of the (already Demand-Weight-ranked) table,
     adds back any topic a prior Gap blamed, then closes transitively over hard
-    prerequisites — frequency decides emphasis, prerequisites decide inclusion.
+    prerequisites — Demand Weight decides emphasis, prerequisites decide inclusion.
     """
     if not table.entries:
         return ()
@@ -424,7 +424,7 @@ def _print_curriculum(curriculum: Curriculum) -> None:
         for resource in module.resources:
             print(f"   resource: {resource.title}{f' <{resource.url}>' if resource.url else ''}")
         for entry in module.deferred_resources:
-            print(f"   deferred: {entry.skill} (frequency={entry.frequency})")
+            print(f"   deferred: {entry.skill} (demand weight {entry.demand_weight:.2f})")
         print()
     for gap in curriculum.uncovered_gaps:
         print(f"UNCOVERED GAP: {gap.description}")

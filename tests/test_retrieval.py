@@ -38,11 +38,11 @@ def fixture_curriculum() -> Curriculum:
     table = ParetoTable(
         target_skill="smart contract development",
         entries=(
-            ParetoEntry("solidity syntax", 3, ("Solidity documentation",)),
-            ParetoEntry("reentrancy guards", 3, ("Solidity documentation",)),
-            ParetoEntry("ERC-20 standard", 2, ("Ethereum.org smart contracts",)),
-            ParetoEntry("formal verification", 1, ("Solidity documentation",)),
-            ParetoEntry("zk circuits", 1, ("Ethereum.org developer docs index",)),
+            ParetoEntry("reentrancy guards", 0.65, ("O*NET Blockchain Engineers", "OWASP Smart Contract Top 10")),
+            ParetoEntry("solidity syntax", 0.6, ("O*NET Blockchain Engineers",)),
+            ParetoEntry("ERC-20 standard", 0.4, ("O*NET Blockchain Engineers",)),
+            ParetoEntry("formal verification", 0.0, ("Cyfrin exam objectives",)),
+            ParetoEntry("zk circuits", 0.0, ("Cyfrin exam objectives",)),
         ),
     )
     return assemble_curriculum(table, TOPICS, PREREQUISITES, RESOURCES, {})
@@ -99,7 +99,7 @@ def test_a_prerequisite_the_curriculum_teaches_late_is_still_in_the_chunk():
     # A prerequisite ordered after the Module that needs it is the one case where
     # a learner really is missing something. Leaving it out of the retrievable
     # text would make the Module read as assuming nothing.
-    table = ParetoTable("smart contract development", (ParetoEntry("reentrancy guards", 1, ()),))
+    table = ParetoTable("smart contract development", (ParetoEntry("reentrancy guards", 0.5, ()),))
     curriculum = assemble_curriculum(
         table, ("reentrancy guards", "solidity syntax"), PREREQUISITES, RESOURCES, {}
     )

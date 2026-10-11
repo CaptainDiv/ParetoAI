@@ -14,7 +14,7 @@ The Analyst originally ranked skills by how many canonical documentation pages m
 - **O*NET's weights are coarse exactly where the Curriculum needs them fine.** Its tasks are occupation-level ("Test the security and performance of blockchain infrastructures"), not Solidity-level, so the only real numeric signal does not decompose to the granularity a Module wants.
 - **The security-bias trap is this ADR's own hazard in demand-shaped clothing.** OWASP Top 10, OWASP SCWE and EEA EthTrust are all security documents; adopting them as three Sources would make security rank high *because three security Sources were chosen* — precisely the circularity diagnosed above for documentation. Count the OWASP family as one signal.
 - `PAGE_TEXT_CHARS` is now a **content** decision, not just a token budget: a global 5000-char cap is what excludes the EthTrust checklist, whose first requirement sits at offset ~5,868. Per-Source caps serve this definition better than one global cap.
-- `ParetoEntry.frequency` is misnamed under this decision and still computes `len(sources)`. The code lags the model until #11 lands.
+- `ParetoEntry.frequency` is misnamed under this decision and still computes `len(sources)`. The code lags the model until #11 lands. _(Resolved by #11: `ParetoEntry.demand_weight` combines each Source's own scale, per ADR-0006.)_
 
 ## Correction (2026-10-10)
 
