@@ -17,12 +17,16 @@ The Analyst agent's output: a table of skills for the Target Skill, ranked by De
 _Avoid_: skill list, rankings
 
 **Demand Weight**:
-How strongly a skill's Sources report the market demanding it — the number a Pareto Table ranks on. Each Source reports demand on its own Demand Scale (task-importance ratings, percentage of survey respondents, share of a certification exam), so a Demand Weight combines those rather than counting how many Sources mention the skill.
+How strongly a skill's Sources report the market demanding it — the number a Pareto Table ranks on. Each Source reports demand on its own Demand Scale (Occupational Task importance ratings, percentage of survey respondents, share of a certification exam), so a Demand Weight combines those rather than counting how many Sources mention the skill. Only Ratings feed it: a Rank orders skills that tie on Demand Weight but does not weigh them.
 _Avoid_: frequency (it reads as a count of mentions, which is what this deliberately is not), score, rank (a Rank is one kind of Demand Scale, which a Source reports in, not what the table ranks on)
 
 **Demand Scale**:
-How a Source reports demand: a **Rating** (a number up to a stated maximum, higher meaning more demanded, such as an importance rating out of 100) or a **Rank** (a place in an ordered list, first meaning most demanded). A Source that names skills without weighing them, like a certification's objectives list, has no Demand Scale.
+How a Source reports demand: a **Rating** (a number up to a stated maximum, higher meaning more demanded, such as an importance rating out of 100) or a **Rank** (a place in an ordered list, first meaning most demanded). A Rating says how much; a Rank says only which comes first. A Source that names skills without weighing them, like a certification's objectives list, has no Demand Scale.
 _Avoid_: unit, metric, weighting (alone)
+
+**Occupational Task**:
+One unit of work a Source says the occupation performs, such as O*NET's "Test the security and performance of blockchain infrastructures". It is not a skill, and a Pareto Table never lists one: a Source that rates Occupational Tasks weighs a skill through the Occupational Tasks it serves.
+_Avoid_: task (alone — it collides with Proof-of-Skill Task), duty, job task
 
 **Curriculum**:
 The ordered set of Modules the Curriculum agent cuts from the top ~20% of the Pareto Table, in prerequisite order. Produced fresh each Round.
@@ -86,8 +90,9 @@ _Avoid_: appendix, extra reading
 
 ## Rules
 
-- **A skill's absence from a Source counts against it only if that Source measures the whole Target Skill.** Documents that divide a subject between them cannot be weighed against each other: a skill missing from one says only that the document was about something else. This is why a Source must be a demand measure, not reference documentation.
+- **A skill's absence from a Source counts against it only if that Source measures the whole Target Skill.** Documents that divide a subject between them cannot be weighed against each other: a skill missing from one says only that the document was about something else. This is why a Source must be a demand measure, not reference documentation. A Source that rates Occupational Tasks never names a skill at all, so for it absence means the skill serves none of its Occupational Tasks.
 - **A Source with no Demand Scale can add skills to a Pareto Table but cannot weigh them.** An enumeration such as a certification's objectives list says a skill is demanded, not how strongly, so it contributes nothing to any Demand Weight (ADR-0006).
+- **A Rank orders but does not weigh.** A place in a list says which skill comes first, not how far apart two places are or how little the last one is worth; read as a level, a list's own tenth place would count against the skills it names. So among skills of equal Demand Weight, one a Rank places comes first, in that Rank's order (ADR-0007).
 - **Prerequisite-closure is non-negotiable.** If a low-Demand-Weight Pareto Table entry is a hard prerequisite of anything in the Curriculum, the Curriculum agent must include it regardless of its rank. Demand Weight decides emphasis; prerequisites decide inclusion.
 - **Ground Truth is never exposed to a Student Agent**, before or during an Attempt.
 - **Retrieval reaches only what a Module teaches.** A Student Agent's knowledge of the Target Skill is bounded to the Chunks it retrieves, and a Chunk carries a Module's active content alone. Deferred Resources are linked for a learner who wants depth past job-readiness, not material the Curriculum claims to teach: retrieving them would bound a Student Agent to the whole Pareto Table again, leaving nothing to prove about the 20% cut.

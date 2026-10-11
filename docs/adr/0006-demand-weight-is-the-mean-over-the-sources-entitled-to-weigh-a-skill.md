@@ -1,5 +1,7 @@
 # Demand Weight is the mean over the Sources entitled to weigh a skill
 
+> **Superseded (partially) by ADR-0007.** The mean over the Sources entitled to weigh a skill still stands, but only Ratings take part now: a Rank orders skills of equal Demand Weight without weighing them. And O*NET no longer names skills of its own. It rates Occupational Tasks and weighs each skill through the ones it serves, so its silence means a skill serves none of them. The first consequence below is what ADR-0007 resolves.
+
 Each Source reports demand on its own scale, so the Analyst first reads every report as a fraction of that scale: a **Rating** (O*NET's 0–100 task importance) as `rating / maximum`, a **Rank** (OWASP's SC01–SC10) linearly as `(count − rank + 1) / count`, and a Source with **no scale** (Cyfrin's exam objectives) as no weight at all. A skill's **Demand Weight** is then the mean of those fractions over the Sources *entitled to weigh it*: every Source with a scale that cites it, plus every Source with a scale that measures the whole Target Skill and does not cite it, whose silence counts as 0. A Source that measures one part of the Target Skill is left out of a skill it is silent on rather than read as 0. That is the `CONTEXT.md` rule — *a skill's absence from a Source counts against it only if that Source measures the whole Target Skill* — turned into arithmetic: a mean is the combination under which scope changes the answer at all, because leaving a Source out shrinks the denominator rather than merely adding nothing.
 
 ## Considered Options
