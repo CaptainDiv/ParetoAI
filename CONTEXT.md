@@ -53,7 +53,7 @@ The actual merged PR that closed the Proof-of-Skill Task's GitHub issue. Used on
 _Avoid_: solution, answer key
 
 **Checkpoint**:
-Entire's auto-captured record of one Attempt: the commit plus the full coding-agent transcript (prompts, files touched, tool calls, reasoning). Entire's checkpoint capture only works for its supported coding-agent CLIs (currently Claude Code and Gemini CLI), which constrains how Student Agents must be implemented.
+Entire's auto-captured record of one Attempt: the commit plus the full coding-agent transcript (prompts, files touched, tool calls, reasoning). Entire's checkpoint capture only works for its supported coding-agent CLIs (currently Claude Code, Codex, Cursor, OpenCode and others — not Gemini CLI, whose native support was retired; see ADR-0004 and ADR-0005), which constrains how Student Agents must be implemented.
 _Avoid_: trace (that term is reserved for neatlogs' spans, a different kind of record)
 
 **Judge Agent**:

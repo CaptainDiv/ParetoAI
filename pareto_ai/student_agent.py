@@ -1,4 +1,4 @@
-"""Student Agent: a real Gemini CLI Attempt against a Proof-of-Skill Task.
+"""Student Agent: a real OpenCode Attempt against a Proof-of-Skill Task.
 
 Ticket #6. One Attempt is one Student Agent, conditioned on one Learner
 Profile, working a Module's Proof-of-Skill Task in its own isolated clone of
@@ -20,20 +20,29 @@ it is structural rather than a convention to remember:
     context — the clone is just files on disk, and the GroundTruth itself is
     never written into any prompt.
 
-Checkpoint capture for the Gemini CLI session runs through `entire-agent-gemini`
-(see that module and ADR-0004) — Entire's native Gemini support was retired,
-so this ticket depends on that integration being on `$PATH` and the machine
-having already run `entire login`, neither of which an agent can do on a
-user's behalf. `enable_entire` below is what actually registers it
-(`entire enable --agent gemini`, not `entire agent add gemini` — see
-ADR-0004 for why the latter alone doesn't work).
+The coding-agent engine is OpenCode, not Gemini CLI — see ADR-0005 for the
+switch and why. In short: ADR-0004's custom `entire-agent-gemini` integration
+genuinely works (confirmed live: login, enablement, hook installation, a real
+commit), but Gemini CLI's own Policy Engine denies every `run_shell_command`
+call under full headless automation (`--yolo` plus workspace trust isn't
+enough — confirmed by hitting the same wall in two independent environments),
+which blocks every edit-run-commit step an Attempt needs. OpenCode is
+natively supported by Entire (`entire enable --agent opencode` — no custom
+integration required) and has no equivalent headless-shell gate. The LLM
+behind it is the neatHack hackathon's own LiteLLM gateway
+(`opencode.json` at the repo root, `LITELLM_API_KEY` in `.env`) rather than a
+provider's small free tier — Groq's free-tier organization-wide token budget
+(8,000 TPM) is smaller than OpenCode's own baseline tool-definition overhead,
+so every call failed before Entire or the task ever entered the picture,
+regardless of which Groq model was chosen.
 
 Pure core (prompt assembly, workspace naming) is TDD'd. Everything that shells
-out — git, entire, gemini — is live and smoke-tested via main(), per the
+out — git, entire, opencode — is live and smoke-tested via main(), per the
 project's established pattern (see proof_of_skill.fetch_task_candidates,
 retrieval's live smoke test): these genuinely need the real tools on $PATH,
 which unit tests cannot stand in for without pretending to verify something
-they can't.
+they can't. Verified live end-to-end on 2026-10-11: a real edit, a real
+commit, and a real Entire Checkpoint linked to it on `entire/checkpoints/v1`.
 """
 
 from __future__ import annotations
@@ -56,19 +65,20 @@ from pareto_ai.curriculum import Curriculum, Module, run_curriculum, with_proof_
 from pareto_ai.proof_of_skill import GroundTruth, run_proof_of_skill_sourcing
 from pareto_ai.retrieval import Chunk, retrieve
 
-GEMINI_TIMEOUT_SECONDS = 1800
+OPENCODE_TIMEOUT_SECONDS = 1800
 RETRIEVAL_K = 3
 
-# Gemini CLI's own router picks a flagship model (gemini-3.8-flash at the time
-# of writing) by default, and that model's free-tier quota is 20 requests/day
-# shared across every call this project makes — exhausted mid-development, by
-# hand, well short of a real Attempt's actual tool-call volume. The "-lite"
-# variants are the same model family at 500 requests/day (confirmed live via
-# https://ai.dev/rate-limit on 2026-10-11), so pinning one here is a real fix
-# for running out of quota during a demo or judging, not a downgrade in what's
-# being tested — Entire capture and the integration don't care which Gemini
-# model produced the turn.
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+# "litellm" names the provider block in opencode.json, which points at
+# neatHack's own gateway rather than a provider's small free tier; "nova-lite"
+# is Amazon Nova Lite, cheap enough that the hackathon's $20 shared budget
+# covers thousands of Attempt-sized calls (confirmed live, ~14k tokens for a
+# trivial one-file task costs effectively nothing against that budget).
+OPENCODE_MODEL = "litellm/nova-lite"
+
+# opencode.json lives at the repo root, not inside pareto_ai/, so it survives
+# being pointed at from any workspace OpenCode runs in via OPENCODE_CONFIG —
+# see run_opencode_attempt.
+OPENCODE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "opencode.json"
 
 
 @dataclass(frozen=True)
@@ -112,9 +122,9 @@ class AttemptResult:
     profile: LearnerProfile
     module_topic: str
     workspace: Path
-    gemini_exit_code: int
+    opencode_exit_code: int
     commit_sha: str | None  # None if the Attempt never committed anything
-    checkpoint_verified: bool  # a Checkpoint for commit_sha was found on entire/checkpoints/v1
+    checkpoint_verified: bool  # Entire has a real Checkpoint linked to commit_sha
 
 
 # --- pure core ---------------------------------------------------------------
@@ -202,21 +212,24 @@ def enable_entire(workspace: Path) -> None:
     """Turn on Entire's checkpoint capture for this one clone.
 
     Required before a commit in `workspace` can produce a Checkpoint at all —
-    "enable Entire" is explicit in issue #6's "what to build". `--agent gemini`
-    does double duty here, confirmed live: `entire agent add gemini` alone
-    answers "Unknown agent" (external-agent discovery is gated behind an
-    `external_agents` setting nothing sets automatically), but `entire enable
-    --agent gemini` bypasses that gate for this one named, explicit selection
-    and both registers *and* enables the integration in a single call — see
-    ADR-0004. `--checkpoint-backend branch` is explicit because Entire's
+    "enable Entire" is explicit in issue #6's "what to build". OpenCode is one
+    of Entire's own built-in agent integrations, confirmed live: this one call
+    both registers and enables it, with no custom integration (contrast
+    ADR-0004's Gemini CLI plugin, which `--agent gemini` needed and this
+    doesn't). `--checkpoint-backend branch` is explicit because Entire's
     current default is per-commit git refs, not the `entire/checkpoints/v1`
     branch CONTEXT.md's Checkpoint entry names.
     """
+    # shell=True: confirmed live that `entire` (an npm-adjacent-style install,
+    # not a plain PATH exe Windows' CreateProcess can launch directly) raises
+    # WinError 2 without it, while `git` — a real registered .exe — does not
+    # need it. See run_opencode_attempt for the same issue with `opencode`.
     subprocess.run(
-        ["entire", "enable", "--agent", "gemini", "--checkpoint-backend", "branch"],
+        ["entire", "enable", "--agent", "opencode", "--checkpoint-backend", "branch"],
         cwd=workspace,
         check=True,
         capture_output=True,
+        shell=True,
     )
 
 
@@ -228,43 +241,49 @@ def compute_repo_map(workspace: Path) -> str:
     fails — a missing Repo Map should stop the Attempt, not quietly start it
     with an empty one that reads as "this repo has no structure".
     """
-    subprocess.run(["entire", "graph", "index"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(["entire", "graph", "index"], cwd=workspace, check=True, capture_output=True, shell=True)
     snapshot = subprocess.run(
-        ["entire", "graph", "snapshot"], cwd=workspace, check=True, capture_output=True
+        ["entire", "graph", "snapshot"], cwd=workspace, check=True, capture_output=True, shell=True
     )
     return snapshot.stdout.decode("utf-8", errors="replace")
 
 
-def run_gemini_attempt(workspace: Path, prompt: str) -> int:
-    """Run the Attempt as a real, non-interactive Gemini CLI session.
+def run_opencode_attempt(workspace: Path, prompt: str) -> int:
+    """Run the Attempt as a real, non-interactive OpenCode session.
 
-    Two separate gates have to be cleared for a freshly cloned, never-opened-
-    interactively workspace to actually edit files and commit headlessly, not
-    just one — confirmed live, not assumed (see ADR-0004):
+    Confirmed live, not assumed (see ADR-0005):
 
-    - `--yolo` auto-approves tool calls instead of prompting.
-    - `GEMINI_CLI_TRUST_WORKSPACE=true` is what actually grants the Policy
-      Engine's trust, which gates `run_shell_command` independently of
-      approval mode. `--skip-trust` alone only skips the interactive trust
-      *prompt* — it does not grant this, so `run_shell_command` (needed for
-      every edit-run-commit step of an Attempt) is denied by policy under
-      `--skip-trust --yolo` even though `--yolo` auto-approves everything
-      else.
+    - `--auto` auto-approves tool calls (edits, shell commands) that aren't
+      explicitly denied. OpenCode has no equivalent of Gemini CLI's Policy
+      Engine shell-command gate that `--auto`/`--yolo` fails to satisfy.
+    - `stdin=subprocess.DEVNULL` matters, not just convenience: an inherited
+      stdin stops OpenCode from loading Entire's plugin at all, so no
+      Checkpoint would ever be captured.
+    - `PWD` is set explicitly because OpenCode resolves its project (and
+      which plugins, including Entire's, it loads) from `PWD`, not from the
+      subprocess's working directory alone.
+    - `OPENCODE_CONFIG` points at this repo's `opencode.json`, which declares
+      the `litellm` provider (neatHack's gateway) and, critically, a `limit`
+      block per model — omitting it makes OpenCode request an output-token
+      cap the gateway's models reject outright, confirmed live (Nova Lite's
+      hard cap is 10,000; OpenCode defaults to requesting far more without an
+      explicit limit).
 
-    `-m GEMINI_MODEL` pins a high-quota model rather than leaving Gemini's own
-    router to pick its flagship model, whose free-tier daily cap (20 requests)
-    this project exhausted by hand well short of a real Attempt's tool-call
-    volume — pinning the same family's "-lite" variant (500/day) is how a demo
-    or judging run avoids hitting that wall.
-
-    Checkpoint capture happens as a side effect of this call, through hooks
-    `entire-agent-gemini` installed — nothing here talks to Entire directly.
+    Checkpoint capture happens as a side effect of this call, through the
+    hooks `entire enable --agent opencode` installed — nothing here talks to
+    Entire directly.
     """
+    # shell=True: confirmed live that bare `subprocess.run(["opencode", ...])`
+    # raises WinError 2 — like `gemini`, OpenCode's Windows install is a
+    # .cmd/.ps1 shim, not a plain exe Windows' CreateProcess can launch
+    # directly.
     result = subprocess.run(
-        ["gemini", "-m", GEMINI_MODEL, "-p", prompt, "--yolo"],
+        ["opencode", "run", "--format", "json", "--dir", str(workspace), "--auto", "-m", OPENCODE_MODEL, prompt],
         cwd=workspace,
-        timeout=GEMINI_TIMEOUT_SECONDS,
-        env={**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"},
+        timeout=OPENCODE_TIMEOUT_SECONDS,
+        env={**os.environ, "OPENCODE_CONFIG": str(OPENCODE_CONFIG_PATH), "PWD": str(workspace)},
+        stdin=subprocess.DEVNULL,
+        shell=True,
     )
     return result.returncode
 
@@ -276,29 +295,26 @@ def committed_sha(workspace: Path, before_sha: str) -> str | None:
 
 
 def verify_checkpoint(workspace: Path, commit_sha: str) -> bool:
-    """Whether `entire/checkpoints/v1` carries a Checkpoint naming `commit_sha`.
+    """Whether Entire has a real Checkpoint linked to `commit_sha`.
 
     This is the acceptance criterion in issue #6 that makes a Checkpoint "real"
-    rather than merely attempted: `run_gemini_attempt` only triggers capture via
-    the hooks `entire-agent-gemini` installs, so this is what actually confirms
-    one landed. Best-effort by design, not by neglect — Entire's exact
-    checkpoint storage format on that branch isn't documented, so this looks
-    for the one thing that must be true of any encoding: the branch exists and
-    some commit on it mentions `commit_sha`. False (not an exception) on any
-    git failure, including the branch not existing yet: that is itself a
-    legitimate "not verified" answer the caller needs to see, not a crash.
+    rather than merely attempted. Goes through `entire checkpoint explain`
+    rather than reading `entire/checkpoints/v1` directly: confirmed live that a
+    Checkpoint's commit on that branch names the Checkpoint's own ID
+    ("Checkpoint: a637ea51c4cd"), not the original commit's SHA, so grepping
+    the branch for `commit_sha` would never match — `entire checkpoint
+    explain` is Entire's own authoritative answer to "does this commit have
+    one", not a guess at its storage format. False (not an exception) on any
+    failure, including no Checkpoint existing yet: that is itself a legitimate
+    "not verified" answer the caller needs to see, not a crash.
     """
-    try:
-        log = subprocess.run(
-            ["git", "log", "entire/checkpoints/v1", "--all", "--oneline", f"--grep={commit_sha}"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError:
-        return False
-    return bool(log.stdout.strip())
+    result = subprocess.run(
+        ["entire", "checkpoint", "explain", commit_sha],
+        cwd=workspace,
+        capture_output=True,
+        shell=True,
+    )
+    return result.returncode == 0
 
 
 @neatlogs.span(kind="AGENT", role="Student")
@@ -318,14 +334,14 @@ def run_attempt(
 
     repo_map = compute_repo_map(workspace)
     prompt = build_attempt_prompt(module, profile, chunks, repo_map)
-    exit_code = run_gemini_attempt(workspace, prompt)
+    exit_code = run_opencode_attempt(workspace, prompt)
 
     commit_sha = committed_sha(workspace, before_sha)
     return AttemptResult(
         profile=profile,
         module_topic=module.topic,
         workspace=workspace,
-        gemini_exit_code=exit_code,
+        opencode_exit_code=exit_code,
         commit_sha=commit_sha,
         checkpoint_verified=commit_sha is not None and verify_checkpoint(workspace, commit_sha),
     )
@@ -344,7 +360,7 @@ def _run_attempts_for_every_profile(
         chunks = retrieve(curriculum, module.proof_of_skill_task.title, RETRIEVAL_K)
         print(f"\n--- Attempt: {module.topic} / {profile.name} ---")
         result = run_attempt(module, ground_truth, profile, chunks, workspace_root=workspace_root)
-        print(f"gemini exit code: {result.gemini_exit_code}")
+        print(f"opencode exit code: {result.opencode_exit_code}")
         print(f"committed: {result.commit_sha or '(no commit)'}")
         print(f"checkpoint verified on entire/checkpoints/v1: {result.checkpoint_verified}")
         shutil.rmtree(result.workspace, ignore_errors=True)

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "neatHack LiteLLM (Nova and Claude)",
+      "options": {
+        "baseURL": "https://litellm.vision.aivar.app/v1",
+        "apiKey": "{env:LITELLM_API_KEY}"
+      },
+      "models": {
+        "nova-micro": { "name": "Amazon Nova Micro", "limit": { "context": 128000, "output": 8000 } },
+        "nova-lite": { "name": "Amazon Nova Lite", "limit": { "context": 300000, "output": 8000 } },
+        "nova-pro": { "name": "Amazon Nova Pro", "limit": { "context": 300000, "output": 8000 } },
+        "nova-2-lite": { "name": "Amazon Nova 2 Lite", "limit": { "context": 300000, "output": 8000 } },
+        "claude-haiku": { "name": "Claude Haiku", "limit": { "context": 200000, "output": 8000 } },
+        "claude-sonnet-4.6": { "name": "Claude Sonnet 4.6", "limit": { "context": 200000, "output": 8000 } },
+        "claude-opus-4.6": { "name": "Claude Opus 4.6", "limit": { "context": 200000, "output": 8000 } }
+      }
+    }
+  }
+}
