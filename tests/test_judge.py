@@ -5,6 +5,7 @@ from pareto_ai.student_agent import clone_isolated_workspace
 from pareto_ai.judge import (
     JudgeGradingError,
     _graded,
+    _rubric_prompt,
     fetch_ground_truth,
     grade_gaps,
     is_test_file,
@@ -97,6 +98,38 @@ def test_a_response_with_no_gaps_key_raises():
 def test_unparseable_content_raises():
     with pytest.raises(JudgeGradingError):
         parse_gaps("not json at all", "stop", KNOWN_TOPICS)
+
+
+# --- the rubric prompt: a Gap may blame a skill the Curriculum cut --------------------
+
+
+def test_the_rubric_prompt_offers_cut_skills_apart_from_the_modules():
+    prompt = _rubric_prompt("reentrancy guards", ("reentrancy guards",), ("MEV", "zk circuits"), "diff", "fix")
+
+    modules, _, cut = prompt.partition("NOT IN THIS CURRICULUM")
+    assert "- reentrancy guards" in modules and "- MEV" not in modules
+    assert "- MEV" in cut and "- zk circuits" in cut
+
+
+def test_the_rubric_prompt_without_cut_skills_has_no_empty_list():
+    prompt = _rubric_prompt("reentrancy guards", ("reentrancy guards",), (), "diff", "fix")
+
+    assert "NOT IN THIS CURRICULUM" not in prompt
+
+
+def test_a_gap_naming_a_cut_skill_is_kept_when_that_skill_is_known():
+    content = '{"gaps": [{"description": "never saw a bundler", "module_topic": "MEV"}]}'
+
+    gaps = parse_gaps(content, "stop", (*KNOWN_TOPICS, "MEV"))
+
+    assert gaps == (Gap(description="never saw a bundler", module_topic="MEV"),)
+
+
+def test_the_rubric_prompt_asks_for_json_only_with_no_prose():
+    prompt = _rubric_prompt("reentrancy guards", ("reentrancy guards",), ("MEV",), "diff", "fix")
+
+    assert prompt.endswith("Ground Truth with no notable gap. No prose.")
+    assert "Respond with ONLY a JSON object" in prompt
 
 
 # --- _graded: one retry, then give up loudly --------------------------------

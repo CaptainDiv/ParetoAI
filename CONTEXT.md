@@ -65,15 +65,15 @@ Entire's auto-captured record of one Attempt: the commit plus the full coding-ag
 _Avoid_: trace (that term is reserved for neatlogs' spans, a different kind of record)
 
 **Judge Agent**:
-Grades an Attempt against its Ground Truth, producing Gaps mapped to specific Modules.
+Grades an Attempt against its Ground Truth, producing Gaps mapped to the Pareto Table entries responsible.
 _Avoid_: grader, evaluator
 
 **Gap**:
-A specific weakness the Judge Agent finds in an Attempt, mapped to the Module responsible (or flagging that no existing Module covers it). Fed back to the Curriculum agent to add or reorder Modules.
+A specific weakness the Judge Agent finds in an Attempt, mapped to the Pareto Table entry whose teaching would have prevented it: a Module of the Curriculum the Attempt ran against, or an entry that Curriculum cut (or flagged as covered by no entry at all). Fed back to the Curriculum agent, which adds the cut entries the Gaps blame most (at most two a Round) to the next Curriculum (ADR-0009).
 _Avoid_: issue (ambiguous with "GitHub issue"), weakness
 
 **Round**:
-One full iteration of Curriculum → Student Agent Attempts → Judge Agent → Gaps → Curriculum revision. Stops when every Learner Profile independently hits the pass-rate threshold (70%) — not an average across profiles, since the point of multiple profiles is to catch a path that works for one but not the other — or after 3 Rounds, whichever comes first.
+One full iteration of Curriculum → Student Agent Attempts → Judge Agent → Gaps, with the Curriculum agent revising the Curriculum from those Gaps before the next Round. A Module keeps its Proof-of-Skill Task from Round to Round, so a pass rate moves because the teaching changed and not the exam. Stops when every Learner Profile independently hits the pass-rate threshold (70%) — not an average across profiles, since the point of multiple profiles is to catch a path that works for one but not the other — or after 3 Rounds, whichever comes first.
 _Avoid_: iteration, loop (alone), cycle
 
 **Readiness Report**:

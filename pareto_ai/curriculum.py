@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import sys
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, TypeVar
@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
 MAX_RESOURCES_PER_MODULE = 2
 TOP_FRACTION = 0.2
+# A Round's Gaps may name any Pareto Table entry, so without a bound one weak
+# Attempt could add a Module per Gap. Every Module added is another Attempt per
+# Learner Profile in the next Round (minutes each, against a shared budget), so
+# a revision takes on only the entries the Gaps blame most.
+MAX_TOPICS_ADDED_BY_GAPS = 2
 PLANNING_MAX_TOKENS = 8192
 
 PlanT = TypeVar("PlanT", bound=Mapping)
@@ -49,9 +54,11 @@ class Resource:
 
 @dataclass(frozen=True)
 class Gap:
-    """A weakness the Judge agent found, mapped to the Module responsible.
+    """A weakness the Judge agent found, mapped to the skill whose teaching would have prevented it.
 
-    module_topic is None when the Judge found nothing in the Curriculum covers it.
+    module_topic is a Module of the Curriculum the Attempt ran against, or a Pareto
+    Table entry that Curriculum cut (the next Curriculum then adds it). It is None
+    when the Judge found no entry in the table covers it.
     """
 
     description: str
@@ -108,12 +115,18 @@ def select_module_topics(
     prerequisites: Mapping[str, Sequence[str]],
     *,
     prior_gaps: Sequence[Gap] = (),
+    keep: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """The topic of each Module the Curriculum will have, in prerequisite order.
 
-    Starts from the top TOP_FRACTION of the (already Demand-Weight-ranked) table,
-    adds back any topic a prior Gap blamed, then closes transitively over hard
-    prerequisites — Demand Weight decides emphasis, prerequisites decide inclusion.
+    Starts from the top TOP_FRACTION of the (already Demand-Weight-ranked) table
+    plus the `keep` topics (the last Curriculum's Modules: a Module a Gap added is
+    no longer blamed once it is taught, so dropping it would bring the Gap back),
+    then adds the entries outside that the prior Gaps blame most (at most
+    MAX_TOPICS_ADDED_BY_GAPS, ties in table order), and closes transitively over
+    hard prerequisites — Demand Weight decides emphasis, prerequisites decide
+    inclusion. This is how a Round's Gaps grow the next Curriculum. A topic
+    already in through closure is not "added", so blaming it uses no allowance.
     """
     if not table.entries:
         return ()
@@ -123,12 +136,22 @@ def select_module_topics(
 
     cut = max(1, math.ceil(TOP_FRACTION * len(table.entries)))
     seeds = [entry.skill for entry in table.entries[:cut]]
-    seeds += [
-        gap.module_topic
-        for gap in prior_gaps
-        if gap.module_topic is not None and gap.module_topic in known_skills
-    ]
+    seeds += [topic for topic in keep if topic in known_skills]
+    already_in = _closed_over_prerequisites(seeds, prerequisites, known_skills)
 
+    blamed = Counter(
+        gap.module_topic for gap in prior_gaps if gap.module_topic in known_skills and gap.module_topic not in already_in
+    )
+    seeds += sorted(blamed, key=lambda topic: (-blamed[topic], rank_of[topic]))[:MAX_TOPICS_ADDED_BY_GAPS]
+
+    return _in_prerequisite_order(
+        _closed_over_prerequisites(seeds, prerequisites, known_skills), prerequisites, rank_of
+    )
+
+
+def _closed_over_prerequisites(
+    seeds: Sequence[str], prerequisites: Mapping[str, Sequence[str]], known_skills: frozenset[str]
+) -> set[str]:
     selected: set[str] = set()
     pending = deque(seeds)
     while pending:
@@ -137,8 +160,7 @@ def select_module_topics(
             continue
         selected.add(skill)
         pending.extend(_hard_prerequisites(skill, prerequisites, known_skills))
-
-    return _in_prerequisite_order(selected, prerequisites, rank_of)
+    return selected
 
 
 def _in_prerequisite_order(
@@ -400,10 +422,10 @@ def plan_deferrals(target_skill: str, cut_skills: Sequence[str], topics: Sequenc
 
 
 @neatlogs.span(kind="WORKFLOW")
-def run_curriculum(table: ParetoTable, *, prior_gaps: Sequence[Gap] = ()) -> Curriculum:
+def run_curriculum(table: ParetoTable, *, prior_gaps: Sequence[Gap] = (), keep: Sequence[str] = ()) -> Curriculum:
     skills = [entry.skill for entry in table.entries]
     prerequisites = plan_prerequisites(table.target_skill, skills)
-    topics = select_module_topics(table, prerequisites, prior_gaps=prior_gaps)
+    topics = select_module_topics(table, prerequisites, prior_gaps=prior_gaps, keep=keep)
     resources = plan_resources(table.target_skill, topics)
     cut_skills = [skill for skill in skills if skill not in set(topics)]
     deferrals = plan_deferrals(table.target_skill, cut_skills, topics)

@@ -7,8 +7,8 @@ has two independent signals:
               resulting commit — "anchored in something real" rather than an
               LLM's self-report.
   qualitative an LLM-rubric comparison against the Ground Truth PR, producing
-              Gaps mapped to a specific Module (or flagged, per CONTEXT.md, as
-              not covered by any Module in this Curriculum).
+              Gaps mapped to a Pareto Table entry (a Module, or one the
+              Curriculum cut; flagged, per CONTEXT.md, when none covers it).
 
 A real fix PR adds its regression test in the same commit as the fix, so
 running the suite unchanged against an Attempt that changed nothing would
@@ -123,8 +123,9 @@ def select_test_files(changed_paths: Sequence[str]) -> tuple[str, ...]:
 def parse_gaps(content: str, finish_reason: str | None, known_topics: Sequence[str]) -> tuple[Gap, ...]:
     """Read the Judge's rubric Gaps, mapping each to a Module or flagging it.
 
-    A Gap naming a module_topic this Curriculum doesn't have is read as
-    unmapped (module_topic=None) rather than kept as a hallucinated Module —
+    `known_topics` is every skill a Gap may blame: the Curriculum's Modules and
+    the Pareto Table entries it cut. A Gap naming anything else is read as
+    unmapped (module_topic=None) rather than kept as a hallucinated skill —
     mirroring curriculum.py's _hard_prerequisites guard against the same
     failure mode, applied here to Gap.module_topic instead of a prerequisite.
     """
@@ -169,20 +170,32 @@ def regression_test_command(regression_tests: Sequence[str]) -> list[str]:
 
 
 def _rubric_prompt(
-    module_topic: str, known_topics: Sequence[str], attempt_diff: str, ground_truth_diff: str
+    module_topic: str,
+    known_topics: Sequence[str],
+    cut_topics: Sequence[str],
+    attempt_diff: str,
+    ground_truth_diff: str,
 ) -> str:
+    cut_list = (
+        "\n\nSKILLS NOT IN THIS CURRICULUM (cut from it, but available to add):\n"
+        + "\n".join(f"- {topic}" for topic in cut_topics)
+        if cut_topics
+        else ""
+    )
     return (
         f'A Student Agent attempted a real GitHub issue for the Curriculum Module "{module_topic}". '
         "Compare its change against the real merged fix (Ground Truth) and find concrete Gaps in "
         "what the Attempt did or didn't do — do not just restate that it differs from the fix.\n\n"
         "MODULES IN THIS CURRICULUM:\n"
         + "\n".join(f"- {topic}" for topic in known_topics)
+        + cut_list
         + "\n\n=== Attempt's diff ===\n"
         f"{attempt_diff[:DIFF_CHARS]}\n\n"
         "=== Ground Truth diff (the real merged fix; never shown to the Student Agent) ===\n"
         f"{ground_truth_diff[:DIFF_CHARS]}\n\n"
-        "For each Gap, name the ONE module from the list above whose teaching would have "
-        "prevented it, or null if no module above covers it.\n"
+        "For each Gap, name the ONE skill from the lists above whose teaching would have "
+        "prevented it — a module the Curriculum already has, or a skill it left out — or null "
+        "if none of them covers it.\n"
         'Respond with ONLY a JSON object of the form {"gaps": [{"description": "...", '
         '"module_topic": "..." or null}]}. An empty "gaps" list means the Attempt matches the '
         "Ground Truth with no notable gap. No prose."
@@ -207,9 +220,13 @@ def _graded(
 
 @neatlogs.span(kind="AGENT", role="Judge")
 def grade_gaps(
-    module_topic: str, known_topics: Sequence[str], attempt_diff: str, ground_truth_diff: str
+    module_topic: str,
+    known_topics: Sequence[str],
+    attempt_diff: str,
+    ground_truth_diff: str,
+    cut_topics: Sequence[str] = (),
 ) -> tuple[Gap, ...]:
-    """The qualitative half of a grade: Gaps mapped to a Module, from the model.
+    """The qualitative half of a grade: Gaps mapped to a Pareto Table entry, from the model.
 
     Spanned on its own, separately from `run_judge`'s subprocess work (git
     diffing, `npm test`), so the AGENT/Judge span roots only the LLM call —
@@ -223,7 +240,10 @@ def grade_gaps(
     """
     if not attempt_diff.strip():
         return (Gap(description="The Attempt made no changes at all.", module_topic=module_topic),)
-    return _graded(_rubric_prompt(module_topic, known_topics, attempt_diff, ground_truth_diff), known_topics)
+    return _graded(
+        _rubric_prompt(module_topic, known_topics, cut_topics, attempt_diff, ground_truth_diff),
+        (*known_topics, *cut_topics),
+    )
 
 
 # --- live orchestration -------------------------------------------------------
@@ -335,6 +355,7 @@ def run_judge(
     ground_truth: GroundTruth,
     attempt: AttemptResult,
     known_topics: Sequence[str],
+    cut_topics: Sequence[str] = (),
 ) -> JudgeResult:
     """Grade one Attempt: the repo's own suite for the objective signal, the
     LLM-rubric comparison against Ground Truth for the qualitative one.
@@ -342,6 +363,10 @@ def run_judge(
     Not itself spanned — `grade_gaps` carries the AGENT/Judge span around the
     one LLM call this makes; `_judge_one_attempt`'s WORKFLOW span roots this
     function's own git/npm subprocess work for a standalone run.
+
+    `known_topics` are the Curriculum's Modules and `cut_topics` the Pareto Table
+    entries it left out: a Gap may blame either, which is how a Round can ask
+    for a Module the Curriculum does not have yet (ADR-0009).
     """
     if attempt.commit_sha is None:
         return JudgeResult(
@@ -357,7 +382,7 @@ def run_judge(
 
     attempt_diff = git_diff(attempt.workspace, ground_truth.pre_fix_commit_sha, attempt.commit_sha)
     ground_truth_diff = git_diff(attempt.workspace, ground_truth.pre_fix_commit_sha, ground_truth.merge_commit_sha)
-    gaps = grade_gaps(module.topic, known_topics, attempt_diff, ground_truth_diff)
+    gaps = grade_gaps(module.topic, known_topics, attempt_diff, ground_truth_diff, cut_topics)
 
     return JudgeResult(profile=attempt.profile, module_topic=module.topic, passed=passed, gaps=gaps)
 
@@ -376,7 +401,9 @@ def _judge_one_attempt(module, ground_truth, curriculum, base: WarmBase, workspa
     print(f"committed: {attempt.commit_sha or '(no commit)'}")
 
     known_topics = tuple(m.topic for m in curriculum.modules)
-    result = run_judge(module, ground_truth, attempt, known_topics)
+    # Every entry the Curriculum cut is linked from some Module as a Deferred Resource.
+    cut_topics = tuple(entry.skill for m in curriculum.modules for entry in m.deferred_resources)
+    result = run_judge(module, ground_truth, attempt, known_topics, cut_topics)
     discard_attempt_workspace(attempt.workspace)
     return result
 
@@ -387,7 +414,7 @@ def _print_result(result: JudgeResult) -> None:
     if not result.gaps:
         print("gaps: none")
     for gap in result.gaps:
-        mapped = gap.module_topic or "(no module in this curriculum covers it)"
+        mapped = gap.module_topic or "(no Pareto Table entry covers it)"
         print(f"gap: {gap.description}")
         print(f"     -> {mapped}")
 

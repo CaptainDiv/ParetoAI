@@ -136,6 +136,87 @@ def test_a_prior_gap_that_names_no_pareto_table_entry_adds_no_topic():
     assert set(topics) == {"solidity syntax", "gas optimization"}
 
 
+def blaming(*topics: str) -> tuple[Gap, ...]:
+    return tuple(Gap(description=f"weak on {topic}", module_topic=topic) for topic in topics)
+
+
+def test_prior_gaps_add_at_most_two_cut_topics_in_one_revision():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        prior_gaps=blaming("upgradeable proxies", "formal verification", "MEV", "account abstraction", "zk circuits"),
+    )
+
+    # The two seeds from the 20% cut, plus the two cap allows: a Round that could add a
+    # Module per Gap would grow the next Round's Attempts (and bill) with every failure.
+    assert len(topics) == 4
+
+
+def test_the_cut_topics_blamed_most_often_are_the_ones_added():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        prior_gaps=blaming("upgradeable proxies", "MEV", "zk circuits", "MEV", "zk circuits", "MEV"),
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization", "MEV", "zk circuits"}
+
+
+def test_equally_blamed_cut_topics_are_added_in_table_order():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        prior_gaps=blaming("zk circuits", "MEV", "upgradeable proxies"),
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization", "upgradeable proxies", "MEV"}
+
+
+def test_a_gap_naming_a_topic_already_in_the_cut_uses_none_of_the_allowance():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        prior_gaps=blaming("gas optimization", "gas optimization", "MEV", "zk circuits", "upgradeable proxies"),
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization", "upgradeable proxies", "MEV"}
+
+
+def test_a_gap_naming_a_topic_already_in_through_prerequisite_closure_uses_none_of_the_allowance():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={"gas optimization": ("EVM bytecode",)},
+        prior_gaps=blaming("EVM bytecode", "EVM bytecode", "EVM bytecode", "MEV", "zk circuits"),
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization", "EVM bytecode", "MEV", "zk circuits"}
+
+
+def test_modules_kept_from_the_last_curriculum_stay_in_it():
+    # A Module a Gap added last Round is no longer blamed once it is taught, so
+    # without this the next revision would drop it and bring the Gap back.
+    topics = select_module_topics(ten_entry_table(), prerequisites={}, keep=("MEV",))
+
+    assert set(topics) == {"solidity syntax", "gas optimization", "MEV"}
+
+
+def test_kept_modules_do_not_use_the_allowance_for_new_ones():
+    topics = select_module_topics(
+        ten_entry_table(),
+        prerequisites={},
+        keep=("MEV",),
+        prior_gaps=blaming("zk circuits", "upgradeable proxies", "formal verification"),
+    )
+
+    assert set(topics) == {"solidity syntax", "gas optimization", "MEV", "upgradeable proxies", "formal verification"}
+
+
+def test_a_kept_topic_the_table_does_not_have_is_ignored():
+    topics = select_module_topics(ten_entry_table(), prerequisites={}, keep=("cobol",))
+
+    assert set(topics) == {"solidity syntax", "gas optimization"}
+
+
 # --- assemble_curriculum: Modules, Resources, Deferred Resources ---
 
 PREREQUISITES = {"gas optimization": ("solidity syntax",)}
