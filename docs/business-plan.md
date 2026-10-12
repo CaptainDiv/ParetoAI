@@ -79,8 +79,7 @@ hackathon gateway's zero price, so any dollar figure written down now would be i
 ## Results
 
 Built in cfo.ai by Ari on 2026-10-12 from the prompt below. **Shared plan: https://app.cfo.ai/s/0tswRgOA4z8tEgYk**
-(opens in the builder's logged-in session; whether it is viewable without a cfo.ai account has
-not been checked). The model has an Assumptions page, a Cost engine, Monthly operations, a free-cap
+(the builder confirmed on 2026-10-12 that the link opens). The model has an Assumptions page, a Cost engine, Monthly operations, a free-cap
 simulator and Downside and Upside scenarios; every input is editable.
 
 **Everything below is Ari's output from the stated assumptions, not a forecast and not validated.**
