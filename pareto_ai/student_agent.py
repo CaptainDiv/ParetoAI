@@ -48,32 +48,63 @@ commit, and a real Entire Checkpoint linked to it on `entire/checkpoints/v1`.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import neatlogs
 
-from pareto_ai.analyst import run_analyst
-from pareto_ai.curriculum import Curriculum, Module, run_curriculum, with_proof_of_skill_tasks
-from pareto_ai.proof_of_skill import GroundTruth, run_proof_of_skill_sourcing
+from pareto_ai.curriculum import Curriculum, Module
+from pareto_ai.frozen import FROZEN_RUN_PATH, load_or_build_frozen_run
+from pareto_ai.processes import run_killing_tree
+from pareto_ai.proof_of_skill import GroundTruth
 from pareto_ai.retrieval import Chunk, retrieve
+from pareto_ai.warm_base import (
+    WARM_CACHE_DIR,
+    WarmBase,
+    build_attempt_workspace,
+    disable_commit_hooks,
+    discard_attempt_workspace,
+    remove_attempt_workspace,
+    warm_base_dir,
+)
 
-OPENCODE_TIMEOUT_SECONDS = 1800
+# An Attempt is held to five minutes, which is the deadline for the whole OpenCode
+# session *including its own start-up*. Measured 2026-10-12: that start-up alone is
+# ~100 s here (about the same with and without Entire once its plugin dependencies are
+# pre-installed), the agent then read, planned and edited within ~80 s of model time, and
+# a test run on a warm workspace takes ~25 s. A stuck agent costs its whole deadline, so
+# it stays short; what used up eight minutes before was a cold recompile and a plugin
+# install, both now done once up front (warm_base.py, ensure_opencode_plugin_dependencies).
+OPENCODE_TIMEOUT_SECONDS = 300
+OPENCODE_TIMEOUT_EXIT_CODE = 124  # `timeout(1)`'s convention for a killed-for-time command
+ENTIRE_GRAPH_TIMEOUT_SECONDS = 300
+WARM_BASE_STEP_TIMEOUT_SECONDS = 15 * 60  # one-off per pre-fix commit: npm ci, then the first compile
 RETRIEVAL_K = 3
+# The prompt travels as one command-line argument (CreateProcess allows ~32,000
+# characters), and the issue body (up to 4,000) and Chunks share it with the Repo Map.
+REPO_MAP_CHARS = 2000
+REPO_MAP_SYMBOLS_PER_FILE = 8
 
 # "litellm" names the provider block in opencode.json, which points at
-# neatHack's own gateway rather than a provider's small free tier; "nova-lite"
-# is Amazon Nova Lite, cheap enough that the hackathon's $20 shared budget
-# covers thousands of Attempt-sized calls (confirmed live, ~14k tokens for a
-# trivial one-file task costs effectively nothing against that budget).
-OPENCODE_MODEL = "litellm/nova-lite"
+# neatHack's own gateway rather than a provider's small free tier. The model is
+# Claude Haiku, not the cheaper Amazon Nova Lite this started on: confirmed
+# live 2026-10-11 that Nova Lite, given the whole task, looped 90 times on one
+# identical failed file read for 17 minutes and never opened the file the
+# issue named, so an Attempt graded its model's reliability rather than what the
+# Curriculum taught. Haiku is also what the Analyst, Curriculum and Judge already
+# run on (llm.py), so the whole Round shares one gateway budget line.
+OPENCODE_MODEL = "litellm/claude-haiku"
 
 # opencode.json lives at the repo root, not inside pareto_ai/, so it survives
 # being pointed at from any workspace OpenCode runs in via OPENCODE_CONFIG —
@@ -159,6 +190,13 @@ def build_attempt_prompt(
         f"Resolve this issue: {task.title}\n\n"
         f"{task.body}\n\n"
         f"Issue URL: {task.url}\n\n"
+        "The project's dependencies are already installed and its build output is "
+        "already in place — do not run `npm install` or `npm ci`; run a single test file "
+        "with `npx hardhat test <file>`.\n\n"
+        "Always give your file tools (read, edit, write) paths relative to the workspace root, "
+        "such as `contracts/Vault.sol`, exactly as the Repo Map writes them. Your shell is Git "
+        "Bash and shows paths like `/tmp/...` or `/c/...`; the file tools do not understand "
+        "those, so never copy a path from the shell into them.\n\n"
         "Make the smallest change that fixes the issue, run the project's existing "
         "tests, and once they pass, commit your change with a clear commit message. "
         "Do not reference this prompt or any Curriculum material in the commit message."
@@ -179,22 +217,46 @@ def attempt_workspace_name(module_topic: str, profile: LearnerProfile, *, token:
 # --- live orchestration -------------------------------------------------------
 
 
-def clone_isolated_workspace(ground_truth: GroundTruth, parent_dir: Path, *, dir_name: str) -> Path:
-    """A fresh clone of `ground_truth`'s repo, checked out at its pre-fix commit.
+def remote_url_for(ground_truth: GroundTruth) -> str:
+    return f"https://github.com/{ground_truth.repo}.git"
 
-    Every Attempt gets its own clone under `parent_dir`, per CONTEXT.md's rule
-    that Attempts never share a workspace. GroundTruth is used here only to
-    locate the clone — nothing from it is written anywhere a Student Agent
+
+def clone_isolated_workspace(
+    ground_truth: GroundTruth, parent_dir: Path, *, dir_name: str, remote_url: str | None = None
+) -> Path:
+    """A fresh repository holding `ground_truth`'s repo up to its pre-fix commit, and nothing later.
+
+    Every Attempt gets its own workspace under `parent_dir`, per CONTEXT.md's
+    rule that Attempts never share one. GroundTruth is used here only to
+    locate the commit — nothing from it is written anywhere a Student Agent
     reads from.
+
+    This is deliberately not `git clone` + `git checkout`. A clone carries the
+    whole history and an `origin` remote, so the merged fix sat in the
+    Attempt's own repository (measured 2026-10-11: 32 commits past the
+    checked-out one reachable from `origin/master`) and an agent with a shell
+    could `git log origin/master` its way to the Ground Truth. Fetching
+    just the pre-fix commit brings its ancestors and nothing newer, and a
+    fetch from a bare URL leaves no remote behind to fetch more from. The
+    Judge brings the fix in itself, after the Attempt ends (`judge.fetch_ground_truth`).
+
+    What this bounds is the repository, not the machine: an agent with an
+    unrestricted shell can still reach github.com directly. Closing that is a
+    matter of what the agent is permitted to run (opencode.json), not of how
+    the workspace is built.
     """
     workspace = parent_dir / dir_name
+    workspace.mkdir(parents=True)
+    url = remote_url or remote_url_for(ground_truth)
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
     subprocess.run(
-        ["git", "clone", f"https://github.com/{ground_truth.repo}.git", str(workspace)],
+        ["git", "fetch", "--no-tags", url, ground_truth.pre_fix_commit_sha],
+        cwd=workspace,
         check=True,
         capture_output=True,
     )
     subprocess.run(
-        ["git", "checkout", ground_truth.pre_fix_commit_sha],
+        ["git", "checkout", "--detach", ground_truth.pre_fix_commit_sha],
         cwd=workspace,
         check=True,
         capture_output=True,
@@ -233,19 +295,195 @@ def enable_entire(workspace: Path) -> None:
     )
 
 
-def compute_repo_map(workspace: Path) -> str:
-    """Entire's `entire-graph` Repo Map for `workspace`, computed once per task.
+def render_repo_map(snapshot: str, *, focus: str, max_chars: int = REPO_MAP_CHARS) -> str:
+    """A prompt-sized Repo Map out of `entire graph snapshot`'s JSON-lines output.
+
+    The raw snapshot is every symbol and relation in the repo — 4.5 MB for
+    OpenZeppelin, measured 2026-10-11 — so it can neither ride a command line
+    nor fit a model's context. This keeps one line per file (`path: symbols`),
+    most useful first: files whose path or symbols share a word with `focus`
+    (the task's own title), then by how often other code calls or imports
+    something in them. Whole files are dropped when the budget runs out, never
+    cut mid-line, and a snapshot with nothing in it says so rather than
+    rendering "" — an empty map would read as a repo with no structure.
+    """
+    symbols_by_file: dict[str, list[str]] = {}
+    references: Counter[str] = Counter()
+    for line in snapshot.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("record_type") == "symbol" and record.get("kind") != "section":
+            path, name = record.get("file_path"), record.get("name")
+            if path and name:
+                symbols_by_file.setdefault(path, []).append(name)
+        elif record.get("record_type") == "relation" and record.get("type") in ("CALLS", "IMPORTS"):
+            references[str(record.get("to_id", ""))] += 1
+
+    if not symbols_by_file:
+        return "(no symbols were indexed for this repo)"
+
+    focus_words = {word for word in re.findall(r"[a-z0-9]{4,}", focus.lower())}
+
+    def relevance(path: str) -> int:
+        # A word in the path says what the file is about; one in a symbol name
+        # is often generic ("address", "bytes"), so a path match counts triple.
+        in_path = path.lower()
+        in_symbols = " ".join(symbols_by_file[path]).lower()
+        return sum(3 * (word in in_path) + (word in in_symbols) for word in focus_words)
+
+    def referenced(path: str) -> int:
+        return sum(count for target, count in references.items() if f":{path}:" in target or target.endswith(f":{path}"))
+
+    ordered = sorted(symbols_by_file, key=lambda path: (-relevance(path), -referenced(path), path))
+    lines: list[str] = []
+    used = 0
+    for path in ordered:
+        line = f"{path}: {', '.join(symbols_by_file[path][:REPO_MAP_SYMBOLS_PER_FILE])}"
+        if used + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def snapshot_repo(workspace: Path) -> str:
+    """Entire's `entire-graph` snapshot of `workspace`: every symbol and relation, as JSON lines.
 
     Requires `entire` on $PATH with the graph plugin installed
     (`entire plugin install graph`). Raises CalledProcessError if either command
-    fails — a missing Repo Map should stop the Attempt, not quietly start it
-    with an empty one that reads as "this repo has no structure".
+    fails, and TimeoutExpired if one hangs — a missing Repo Map should stop the
+    Attempt, not quietly start it with an empty one that reads as "this repo
+    has no structure". The timeout is not decoration: with the plugin missing,
+    `graph index` once sat for ten minutes inside this harness (CPU idle,
+    nothing written) before being killed by hand, where run directly it
+    failed in under a second. `graph snapshot` takes about 30 seconds on
+    OpenZeppelin, so the cap is generous without being unbounded.
+
+    Raw, because it is computed once per pre-fix commit (`prepare_warm_base`)
+    and rendered per Attempt (`render_repo_map`), which is what makes the
+    Repo Map free for every Attempt after the first.
     """
-    subprocess.run(["entire", "graph", "index"], cwd=workspace, check=True, capture_output=True, shell=True)
+    subprocess.run(
+        ["entire", "graph", "index"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        shell=True,
+        timeout=ENTIRE_GRAPH_TIMEOUT_SECONDS,
+    )
     snapshot = subprocess.run(
-        ["entire", "graph", "snapshot"], cwd=workspace, check=True, capture_output=True, shell=True
+        ["entire", "graph", "snapshot"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        shell=True,
+        timeout=ENTIRE_GRAPH_TIMEOUT_SECONDS,
     )
     return snapshot.stdout.decode("utf-8", errors="replace")
+
+
+def ensure_opencode_plugin_dependencies(workspace: Path) -> None:
+    """Install OpenCode's own plugin package into `workspace/.opencode`, once.
+
+    A workspace with any plugin in `.opencode/plugins` (Entire's is one) makes OpenCode
+    install `@opencode-ai/plugin` there and **wait for it before it starts**. Measured
+    2026-10-12 on the OpenZeppelin workspace: with Entire enabled OpenCode was still
+    starting after 150 s (4 min 40 s in an earlier run) and without a plugin it took
+    ~100 s; with the package pre-installed it started and replied in 107 s. A clean
+    `npm install` of the package takes 31 s, so the in-workspace install is where the
+    minutes went. Doing it once in the warm base means no Attempt pays for it, and
+    Entire's `turn-end` hook (which runs `opencode export`, a second OpenCode start-up)
+    stops stalling for the same reason.
+
+    The install is pinned to the installed OpenCode's own version. A `package.json` is
+    written first so npm resolves against `.opencode` and not the project's own
+    (much larger) `package.json` above it, and the `.gitignore` mirrors the one
+    OpenCode writes, so none of this shows up as a change in the workspace.
+    """
+    opencode_dir = workspace / ".opencode"
+    if (opencode_dir / "package-lock.json").is_file() and (opencode_dir / "node_modules").is_dir():
+        return
+    executable = resolve_opencode_executable(shutil.which("opencode"))
+    version = subprocess.run([str(executable), "--version"], capture_output=True, text=True, check=True).stdout.strip()
+    opencode_dir.mkdir(exist_ok=True)
+    package_json = opencode_dir / "package.json"
+    if not package_json.exists():
+        package_json.write_text("{}\n", encoding="utf-8")
+    gitignore = opencode_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("\n".join(["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore"]), encoding="utf-8")
+    subprocess.run(
+        ["npm", "install", "--save-exact", "--ignore-scripts", "--no-audit", "--no-fund", f"@opencode-ai/plugin@{version}"],
+        cwd=opencode_dir,
+        check=True,
+        capture_output=True,
+        shell=True,
+        timeout=WARM_BASE_STEP_TIMEOUT_SECONDS,
+    )
+
+
+def prepare_warm_base(ground_truth: GroundTruth, cache_dir: Path) -> WarmBase:
+    """The warm base for this Ground Truth's pre-fix commit, built once and reused.
+
+    Built means: fetched without the fix (`clone_isolated_workspace`),
+    dependencies installed, the project compiled so every Attempt starts from
+    build output rather than a cold compile, and the Repo Map snapshotted. A
+    `ready` marker is written last, so a build that died halfway is rebuilt
+    rather than trusted. The npm steps are OpenZeppelin's (this project's one
+    target repo, see proof_of_skill.DEFAULT_TARGET_REPOS); a second target repo
+    would need its own.
+    """
+    directory = warm_base_dir(cache_dir, ground_truth)
+    workspace, snapshot_file, ready = directory / "repo", directory / "snapshot.jsonl", directory / "ready"
+    if ready.exists():
+        ensure_opencode_plugin_dependencies(workspace)  # a base built before this step existed gets it now
+        return WarmBase(path=workspace, snapshot=snapshot_file.read_text(encoding="utf-8"))
+
+    if directory.exists():
+        remove_attempt_workspace(directory)  # a half-built base from an interrupted prepare
+    clone_isolated_workspace(ground_truth, directory, dir_name="repo")
+    for command in (["npm", "ci"], ["npm", "run", "compile"]):
+        subprocess.run(
+            command,
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            shell=True,
+            timeout=WARM_BASE_STEP_TIMEOUT_SECONDS,
+            env={**os.environ, "HUSKY": "0"},  # husky's own switch: do not install commit hooks
+        )
+    disable_commit_hooks(workspace)  # belt and braces: a hook that slipped in would block every commit
+    snapshot = snapshot_repo(workspace)
+    snapshot_file.write_text(snapshot, encoding="utf-8")
+    ensure_opencode_plugin_dependencies(workspace)  # after the snapshot, so the Repo Map never indexes it
+    ready.write_text(ground_truth.pre_fix_commit_sha, encoding="utf-8")
+    return WarmBase(path=workspace, snapshot=snapshot)
+
+
+def resolve_opencode_executable(shim: str | None) -> Path:
+    """OpenCode's real executable, found from the npm shim on $PATH.
+
+    The prompt is a multi-line argument, and `cmd.exe` — which `shell=True`
+    routes it through to reach the `.cmd` shim — cuts a command line at its
+    first newline. Measured 2026-10-11: a Student Agent launched that way
+    received only `=== Learner Profile: Total Beginner ===` and nothing else,
+    so it never saw its Repo Map, its Curriculum notes or the issue, and went
+    looking for beginner documentation instead. The npm package ships the real
+    `opencode.exe` beside the shim, and launching it directly delivers the
+    prompt intact. Raises rather than falling back to `shell=True`: a silent
+    fallback would hand back Attempts that look run and were given nothing
+    (ADR-0002).
+    """
+    if shim is None:
+        raise FileNotFoundError("opencode is not on PATH")
+    executable = Path(shim).parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    if not executable.is_file():
+        raise FileNotFoundError(f"expected OpenCode's real executable at {executable}")
+    return executable
 
 
 def run_opencode_attempt(workspace: Path, prompt: str) -> int:
@@ -273,19 +511,33 @@ def run_opencode_attempt(workspace: Path, prompt: str) -> int:
     hooks `entire enable --agent opencode` installed — nothing here talks to
     Entire directly.
     """
-    # shell=True: confirmed live that bare `subprocess.run(["opencode", ...])`
-    # raises WinError 2 — like `gemini`, OpenCode's Windows install is a
-    # .cmd/.ps1 shim, not a plain exe Windows' CreateProcess can launch
-    # directly.
-    result = subprocess.run(
-        ["opencode", "run", "--format", "json", "--dir", str(workspace), "--auto", "-m", OPENCODE_MODEL, prompt],
+    # No shell: see resolve_opencode_executable — `cmd.exe` truncates the
+    # multi-line prompt at its first newline.
+    exit_code = run_killing_tree(
+        [
+            str(resolve_opencode_executable(shutil.which("opencode"))),
+            "run",
+            "--format",
+            "json",
+            "--dir",
+            str(workspace),
+            "--auto",
+            "-m",
+            OPENCODE_MODEL,
+            prompt,
+        ],
         cwd=workspace,
-        timeout=OPENCODE_TIMEOUT_SECONDS,
+        timeout_seconds=OPENCODE_TIMEOUT_SECONDS,
         env={**os.environ, "OPENCODE_CONFIG": str(OPENCODE_CONFIG_PATH), "PWD": str(workspace)},
         stdin=subprocess.DEVNULL,
-        shell=True,
     )
-    return result.returncode
+    if exit_code is None:
+        # The session and everything it started are already stopped. An Attempt that ran
+        # out of time is an Attempt that did not finish, which the Judge grades from
+        # whatever it committed (usually nothing) — not a reason to lose the whole Round,
+        # and every grade with it.
+        return OPENCODE_TIMEOUT_EXIT_CODE
+    return exit_code
 
 
 def committed_sha(workspace: Path, before_sha: str) -> str | None:
@@ -320,21 +572,37 @@ def verify_checkpoint(workspace: Path, commit_sha: str) -> bool:
 @neatlogs.span(kind="AGENT", role="Student")
 def run_attempt(
     module: Module,
-    ground_truth: GroundTruth,
     profile: LearnerProfile,
     chunks: Sequence[Chunk],
+    base: WarmBase,
     *,
     workspace_root: Path,
 ) -> AttemptResult:
-    """One full Attempt: isolated clone, Repo Map, bounded prompt, real session."""
+    """One full Attempt: its own copy of the warm base, bounded prompt, real session.
+
+    Takes no GroundTruth. The workspace comes from `base`, which was built
+    without the fix, so nothing on this path can reach one.
+    """
+    started = time.monotonic()
     dir_name = attempt_workspace_name(module.topic, profile, token=uuid.uuid4().hex)
-    workspace = clone_isolated_workspace(ground_truth, workspace_root, dir_name=dir_name)
+    workspace = build_attempt_workspace(base, workspace_root, dir_name=dir_name)
+    copied = time.monotonic()
     before_sha = current_head(workspace)
     enable_entire(workspace)
+    enabled = time.monotonic()
 
-    repo_map = compute_repo_map(workspace)
+    repo_map = render_repo_map(base.snapshot, focus=module.proof_of_skill_task.title)
     prompt = build_attempt_prompt(module, profile, chunks, repo_map)
+    prepared = time.monotonic()
+    # Printed because the deadline below is what an Attempt is held to and everything
+    # before it is overhead: one run spent ~4 minutes here for a reason nobody could see.
+    print(
+        f"setup: copy {copied - started:.0f}s, entire enable {enabled - copied:.0f}s, "
+        f"repo map + prompt {prepared - enabled:.0f}s",
+        flush=True,
+    )
     exit_code = run_opencode_attempt(workspace, prompt)
+    print(f"opencode session: {time.monotonic() - prepared:.0f}s", flush=True)
 
     commit_sha = committed_sha(workspace, before_sha)
     return AttemptResult(
@@ -353,17 +621,17 @@ def run_attempt(
 # retrieval.py's identical note on why its own smoke test needs one.
 @neatlogs.span(kind="WORKFLOW", name="student_agent_attempts")
 def _run_attempts_for_every_profile(
-    module: Module, ground_truth: GroundTruth, curriculum: Curriculum, workspace_root: Path
+    module: Module, curriculum: Curriculum, base: WarmBase, workspace_root: Path
 ) -> list[AttemptResult]:
     results = []
     for profile in MVP_LEARNER_PROFILES:
         chunks = retrieve(curriculum, module.proof_of_skill_task.title, RETRIEVAL_K)
         print(f"\n--- Attempt: {module.topic} / {profile.name} ---")
-        result = run_attempt(module, ground_truth, profile, chunks, workspace_root=workspace_root)
+        result = run_attempt(module, profile, chunks, base, workspace_root=workspace_root)
         print(f"opencode exit code: {result.opencode_exit_code}")
         print(f"committed: {result.commit_sha or '(no commit)'}")
         print(f"checkpoint verified on entire/checkpoints/v1: {result.checkpoint_verified}")
-        shutil.rmtree(result.workspace, ignore_errors=True)
+        discard_attempt_workspace(result.workspace)
         results.append(result)
     return results
 
@@ -371,19 +639,17 @@ def _run_attempts_for_every_profile(
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     try:
-        curriculum = run_curriculum(run_analyst("smart contract development"))
-        topics = [module.topic for module in curriculum.modules]
-        assignment = run_proof_of_skill_sourcing(curriculum.target_skill, topics)
-        curriculum = with_proof_of_skill_tasks(curriculum, assignment.tasks)
-
+        frozen = load_or_build_frozen_run(FROZEN_RUN_PATH)
+        curriculum = frozen.curriculum
         module = next((m for m in curriculum.modules if m.proof_of_skill_task is not None), None)
         if module is None:
             print("No module carries a Proof-of-Skill Task; nothing to attempt.")
             return
-        ground_truth = assignment.ground_truths[module.proof_of_skill_task.key]
+        ground_truth = frozen.assignment.ground_truths[module.proof_of_skill_task.key]
 
+        base = prepare_warm_base(ground_truth, WARM_CACHE_DIR)
         with tempfile.TemporaryDirectory(prefix="pareto-attempts-") as workspace_root:
-            _run_attempts_for_every_profile(module, ground_truth, curriculum, Path(workspace_root))
+            _run_attempts_for_every_profile(module, curriculum, base, Path(workspace_root))
     finally:
         neatlogs.flush()
         neatlogs.shutdown()

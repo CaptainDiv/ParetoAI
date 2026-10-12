@@ -1,5 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "permission": { "webfetch": "deny", "websearch": "deny" },
   "provider": {
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",

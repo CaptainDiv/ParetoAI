@@ -44,12 +44,21 @@ from pathlib import Path
 
 import neatlogs
 
-from pareto_ai.analyst import run_analyst
-from pareto_ai.curriculum import Gap, Module, run_curriculum, with_proof_of_skill_tasks
+from pareto_ai.curriculum import Gap, Module
+from pareto_ai.frozen import FROZEN_RUN_PATH, load_or_build_frozen_run
 from pareto_ai.llm import complete, json_object
-from pareto_ai.proof_of_skill import GroundTruth, run_proof_of_skill_sourcing
+from pareto_ai.processes import run_killing_tree
+from pareto_ai.proof_of_skill import GroundTruth
 from pareto_ai.retrieval import retrieve
-from pareto_ai.student_agent import AttemptResult, LearnerProfile, TOTAL_BEGINNER, run_attempt
+from pareto_ai.student_agent import (
+    AttemptResult,
+    LearnerProfile,
+    TOTAL_BEGINNER,
+    prepare_warm_base,
+    remote_url_for,
+    run_attempt,
+)
+from pareto_ai.warm_base import WARM_CACHE_DIR, WarmBase, discard_attempt_workspace
 
 RUBRIC_MAX_TOKENS = 4096
 # Each diff is capped independently: every input token is spent from the
@@ -57,7 +66,8 @@ RUBRIC_MAX_TOKENS = 4096
 # routinely far larger than either cap alone.
 DIFF_CHARS = 3000
 RETRIEVAL_K = 3
-TEST_SUITE_TIMEOUT_SECONDS = 900
+INSTALL_TIMEOUT_SECONDS = 900  # only a cold workspace ever pays this
+TEST_SUITE_TIMEOUT_SECONDS = 300
 
 # Hardhat/Foundry test-file conventions. Heuristic, not authoritative — good
 # enough to tell a regression test from the fix it accompanies in a real
@@ -143,6 +153,21 @@ def parse_gaps(content: str, finish_reason: str | None, known_topics: Sequence[s
     return tuple(gaps)
 
 
+def regression_test_command(regression_tests: Sequence[str]) -> list[str]:
+    """The command the objective signal runs: the Ground Truth's regression tests only.
+
+    `npm test` is `hardhat test` over all 163 of OpenZeppelin's test files
+    after a full compile, which is most of the Judge's wall-clock time, and
+    adds nothing the grade needs: the regression test the real fix shipped is
+    the one that says whether the Attempt fixed *this* issue. Only Hardhat
+    test files can be named to `hardhat test`; a fix whose only tests are
+    Foundry `.t.sol` falls back to the whole suite rather than running nothing
+    and reporting a pass.
+    """
+    hardhat_tests = [path for path in regression_tests if path.endswith((".test.js", ".test.ts"))]
+    return ["npx", "hardhat", "test", *hardhat_tests] if hardhat_tests else ["npm", "test"]
+
+
 def _rubric_prompt(
     module_topic: str, known_topics: Sequence[str], attempt_diff: str, ground_truth_diff: str
 ) -> str:
@@ -204,6 +229,22 @@ def grade_gaps(
 # --- live orchestration -------------------------------------------------------
 
 
+def fetch_ground_truth(workspace: Path, ground_truth: GroundTruth, *, remote_url: str | None = None) -> None:
+    """Bring the real fix into an Attempt's workspace, now that the Attempt is over.
+
+    The workspace was built without it (`student_agent.clone_isolated_workspace`)
+    so a Student Agent could not read its own answer; the Judge needs it to
+    diff against and to take its regression tests from. Called only from
+    `run_judge`, after the Attempt has ended.
+    """
+    subprocess.run(
+        ["git", "fetch", "--no-tags", remote_url or remote_url_for(ground_truth), ground_truth.merge_commit_sha],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+
+
 def changed_files(workspace: Path, from_sha: str, to_sha: str) -> tuple[str, ...]:
     """Paths touched between two commits already reachable in `workspace`'s history."""
     result = subprocess.run(
@@ -219,9 +260,8 @@ def changed_files(workspace: Path, from_sha: str, to_sha: str) -> tuple[str, ...
 def git_diff(workspace: Path, from_sha: str, to_sha: str) -> str:
     """The textual diff between two commits already reachable in `workspace`'s history.
 
-    Both an Attempt's commit and a Ground Truth's merge commit live in the
-    same full clone `student_agent.clone_isolated_workspace` made — never a
-    shallow one — so no extra GitHub fetch is needed to compare them.
+    Both commits must already be in `workspace`: an Attempt's own, and the
+    Ground Truth's merge commit, which `fetch_ground_truth` brings in.
     """
     result = subprocess.run(
         ["git", "diff", from_sha, to_sha], cwd=workspace, check=True, capture_output=True, text=True
@@ -250,35 +290,44 @@ def apply_ground_truth_tests(workspace: Path, ground_truth: GroundTruth) -> tupl
     return paths
 
 
-def run_test_suite(workspace: Path) -> bool:
-    """Whether the target repo's own test suite passes against the current tree.
+def needs_install(workspace: Path) -> bool:
+    """Whether `workspace` still has to install its dependencies.
 
-    OpenZeppelin's package.json names `test` as `hardhat test`; a fresh clone
-    has no node_modules, so installing first is required. Returns False (not
-    an exception) for an install failure or a failing/crashing suite alike —
-    both are legitimate "did not pass" outcomes for the objective signal, not
-    errors in this function.
+    A workspace built from a warm base has them already, as a link into the
+    base (`warm_base.build_attempt_workspace`). `npm ci` deletes `node_modules`
+    before reinstalling it, so running it through that link would wipe the
+    base's dependencies for every Attempt that follows.
     """
-    # shell=True: npm, like entire/opencode elsewhere in this project, is a
-    # Windows .cmd shim rather than a plain exe CreateProcess can launch
-    # directly.
-    install = subprocess.run(
-        ["npm", "ci"],
+    return not (workspace / "node_modules").exists()
+
+
+def run_test_suite(workspace: Path, regression_tests: Sequence[str] = ()) -> bool:
+    """Whether the Ground Truth's regression tests pass against the current tree.
+
+    OpenZeppelin's package.json names `test` as `hardhat test`; a cold clone has
+    no node_modules, so installing first is required, and a warm one does not
+    (see `needs_install`). Returns False (not an exception) for an install
+    failure, a failing or crashing run, or one that outruns its deadline — all
+    legitimate "did not pass" outcomes for the objective signal, not errors in
+    this function. See `regression_test_command` for why only the regression
+    tests run.
+    """
+    # shell=True: npm and npx, like entire/opencode elsewhere in this project,
+    # are Windows .cmd shims rather than plain exes CreateProcess can launch
+    # directly. run_killing_tree stops the whole tree at a deadline, which a
+    # shim's child `node` would otherwise outlive.
+    quiet = {"shell": True, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if needs_install(workspace):
+        installed = run_killing_tree(["npm", "ci"], cwd=workspace, timeout_seconds=INSTALL_TIMEOUT_SECONDS, **quiet)
+        if installed != 0:
+            return False
+    tested = run_killing_tree(
+        regression_test_command(regression_tests),
         cwd=workspace,
-        capture_output=True,
-        shell=True,
-        timeout=TEST_SUITE_TIMEOUT_SECONDS,
+        timeout_seconds=TEST_SUITE_TIMEOUT_SECONDS,
+        **quiet,
     )
-    if install.returncode != 0:
-        return False
-    result = subprocess.run(
-        ["npm", "test"],
-        cwd=workspace,
-        capture_output=True,
-        shell=True,
-        timeout=TEST_SUITE_TIMEOUT_SECONDS,
-    )
-    return result.returncode == 0
+    return tested == 0
 
 
 def run_judge(
@@ -302,8 +351,9 @@ def run_judge(
             gaps=(Gap(description="The Attempt never committed anything.", module_topic=module.topic),),
         )
 
-    apply_ground_truth_tests(attempt.workspace, ground_truth)
-    passed = run_test_suite(attempt.workspace)
+    fetch_ground_truth(attempt.workspace, ground_truth)
+    regression_tests = apply_ground_truth_tests(attempt.workspace, ground_truth)
+    passed = run_test_suite(attempt.workspace, regression_tests)
 
     attempt_diff = git_diff(attempt.workspace, ground_truth.pre_fix_commit_sha, attempt.commit_sha)
     ground_truth_diff = git_diff(attempt.workspace, ground_truth.pre_fix_commit_sha, ground_truth.merge_commit_sha)
@@ -318,16 +368,16 @@ def run_judge(
 # WORKFLOW span has closed. See retrieval.py's and student_agent.py's
 # identical note on why their own smoke tests need one.
 @neatlogs.span(kind="WORKFLOW", name="judge_smoke_test")
-def _judge_one_attempt(module, ground_truth, curriculum, workspace_root: Path) -> JudgeResult:
+def _judge_one_attempt(module, ground_truth, curriculum, base: WarmBase, workspace_root: Path) -> JudgeResult:
     chunks = retrieve(curriculum, module.proof_of_skill_task.title, RETRIEVAL_K)
-    attempt = run_attempt(module, ground_truth, TOTAL_BEGINNER, chunks, workspace_root=workspace_root)
+    attempt = run_attempt(module, TOTAL_BEGINNER, chunks, base, workspace_root=workspace_root)
     print(f"\n--- Attempt: {module.topic} / {attempt.profile.name} ---")
     print(f"opencode exit code: {attempt.opencode_exit_code}")
     print(f"committed: {attempt.commit_sha or '(no commit)'}")
 
     known_topics = tuple(m.topic for m in curriculum.modules)
     result = run_judge(module, ground_truth, attempt, known_topics)
-    shutil.rmtree(attempt.workspace, ignore_errors=True)
+    discard_attempt_workspace(attempt.workspace)
     return result
 
 
@@ -345,19 +395,17 @@ def _print_result(result: JudgeResult) -> None:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     try:
-        curriculum = run_curriculum(run_analyst("smart contract development"))
-        topics = [module.topic for module in curriculum.modules]
-        assignment = run_proof_of_skill_sourcing(curriculum.target_skill, topics)
-        curriculum = with_proof_of_skill_tasks(curriculum, assignment.tasks)
-
+        frozen = load_or_build_frozen_run(FROZEN_RUN_PATH)
+        curriculum = frozen.curriculum
         module = next((m for m in curriculum.modules if m.proof_of_skill_task is not None), None)
         if module is None:
             print("No module carries a Proof-of-Skill Task; nothing to judge.")
             return
-        ground_truth = assignment.ground_truths[module.proof_of_skill_task.key]
+        ground_truth = frozen.assignment.ground_truths[module.proof_of_skill_task.key]
 
+        base = prepare_warm_base(ground_truth, WARM_CACHE_DIR)
         with tempfile.TemporaryDirectory(prefix="pareto-judge-") as workspace_root:
-            result = _judge_one_attempt(module, ground_truth, curriculum, Path(workspace_root))
+            result = _judge_one_attempt(module, ground_truth, curriculum, base, Path(workspace_root))
             _print_result(result)
     finally:
         neatlogs.flush()

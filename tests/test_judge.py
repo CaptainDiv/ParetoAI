@@ -1,13 +1,18 @@
 import pytest
 
 from pareto_ai.curriculum import Gap
+from pareto_ai.student_agent import clone_isolated_workspace
 from pareto_ai.judge import (
     JudgeGradingError,
     _graded,
+    fetch_ground_truth,
     grade_gaps,
     is_test_file,
+    needs_install,
     parse_gaps,
+    run_test_suite,
     select_test_files,
+    regression_test_command,
 )
 
 KNOWN_TOPICS = ("reentrancy guards", "gas optimization")
@@ -122,3 +127,101 @@ def test_an_attempt_with_no_diff_gets_a_gap_with_no_model_call():
     assert len(gaps) == 1
     assert gaps[0].module_topic == "reentrancy guards"
     assert "no changes" in gaps[0].description.lower()
+
+
+# --- regression_test_command -------------------------------------------------------------
+
+
+def test_the_judge_runs_only_the_ground_truths_regression_tests():
+    assert regression_test_command(("test/token/ERC20.test.js",)) == ["npx", "hardhat", "test", "test/token/ERC20.test.js"]
+
+
+def test_several_regression_tests_are_all_passed_to_hardhat():
+    command = regression_test_command(("test/a.test.js", "test/b.test.ts"))
+
+    assert command[-2:] == ["test/a.test.js", "test/b.test.ts"]
+
+
+def test_foundry_tests_are_not_handed_to_hardhat():
+    assert regression_test_command(("contracts/Vault.t.sol", "test/a.test.js")) == ["npx", "hardhat", "test", "test/a.test.js"]
+
+
+def test_a_fix_with_no_hardhat_regression_test_falls_back_to_the_whole_suite():
+    assert regression_test_command(()) == ["npm", "test"]
+    assert regression_test_command(("contracts/Vault.t.sol",)) == ["npm", "test"]
+
+
+# --- fetch_ground_truth ---------------------------------------------------------
+
+
+def test_the_judge_can_bring_the_fix_into_an_attempts_workspace_once_it_has_ended(tmp_path, upstream, ground_truth, git):
+    repo, shas = upstream
+    workspace = clone_isolated_workspace(ground_truth, tmp_path / "attempts", dir_name="a1", remote_url=str(repo))
+
+    fetch_ground_truth(workspace, ground_truth, remote_url=str(repo))
+
+    assert git(workspace, "rev-parse", f"{shas['fix']}^{{commit}}") == shas["fix"]
+    assert git(workspace, "diff", "--name-only", shas["pre_fix"], shas["fix"]) == "Vault.sol"
+
+
+# --- run_test_suite -------------------------------------------------------------
+
+
+def _record_commands(monkeypatch, exit_codes):
+    commands = []
+    codes = iter(exit_codes)
+
+    def fake(args, **kwargs):
+        commands.append(list(args))
+        return next(codes)
+
+    monkeypatch.setattr("pareto_ai.judge.run_killing_tree", fake)
+    return commands
+
+
+def test_dependencies_that_are_already_linked_in_do_not_need_installing(tmp_path):
+    (tmp_path / "node_modules").mkdir()
+
+    assert not needs_install(tmp_path)
+
+
+def test_a_workspace_with_no_dependencies_needs_them_installed(tmp_path):
+    assert needs_install(tmp_path)
+
+
+def test_a_warm_workspace_is_never_reinstalled_because_npm_ci_would_wipe_the_shared_base(tmp_path, monkeypatch):
+    (tmp_path / "node_modules").mkdir()
+    commands = _record_commands(monkeypatch, [0])
+
+    assert run_test_suite(tmp_path, ("test/a.test.js",)) is True
+    assert commands == [["npx", "hardhat", "test", "test/a.test.js"]]
+
+
+def test_a_cold_workspace_installs_before_it_tests(tmp_path, monkeypatch):
+    commands = _record_commands(monkeypatch, [0, 0])
+
+    run_test_suite(tmp_path, ("test/a.test.js",))
+
+    assert commands[0] == ["npm", "ci"]
+    assert commands[1][:3] == ["npx", "hardhat", "test"]
+
+
+def test_a_failed_install_means_the_tests_did_not_pass_and_are_not_run(tmp_path, monkeypatch):
+    commands = _record_commands(monkeypatch, [1])
+
+    assert run_test_suite(tmp_path, ("test/a.test.js",)) is False
+    assert len(commands) == 1
+
+
+def test_failing_tests_did_not_pass(tmp_path, monkeypatch):
+    (tmp_path / "node_modules").mkdir()
+    _record_commands(monkeypatch, [1])
+
+    assert run_test_suite(tmp_path, ("test/a.test.js",)) is False
+
+
+def test_tests_that_outrun_their_deadline_did_not_pass_rather_than_crashing_the_judge(tmp_path, monkeypatch):
+    (tmp_path / "node_modules").mkdir()
+    _record_commands(monkeypatch, [None])
+
+    assert run_test_suite(tmp_path, ("test/a.test.js",)) is False
