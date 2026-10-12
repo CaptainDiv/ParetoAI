@@ -136,4 +136,4 @@ Notes: the first `judge` run builds a one-off warm base of the target repo (abou
 - Occupational data from [O\*NET](https://www.onetonline.org) 15-1299.07 Blockchain Engineers, by the U.S. Department of Labor, Employment and Training Administration, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - Proof-of-Skill Tasks come from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts) (MIT).
 - Built by [@Captin_Div](https://x.com/Captin_Div) during neatHack, October 10–12, 2026, with [@neatlogs](https://x.com/neatlogs), [@EntireHQ](https://x.com/EntireHQ) and [@arithecfo](https://x.com/arithecfo).
-- No license file has been added to this repository yet.
+- Licensed under the [MIT License](LICENSE). The O\*NET data and OpenZeppelin code noted above keep their own licenses.
